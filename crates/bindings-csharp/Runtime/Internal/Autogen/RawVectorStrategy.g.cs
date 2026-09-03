@@ -8,10 +8,8 @@ using System;
 namespace SpacetimeDB.Internal
 {
     [SpacetimeDB.Type]
-    public partial record RawIndexAlgorithm : SpacetimeDB.TaggedEnum<(
-        System.Collections.Generic.List<ushort> BTree,
-        System.Collections.Generic.List<ushort> Hash,
-        ushort Direct,
-        RawVectorIndexV9 Vector
+    public partial record RawVectorStrategy : SpacetimeDB.TaggedEnum<(
+        SpacetimeDB.Unit Exact,
+        RawHnswParamsV9 Hnsw
     )>;
 }

@@ -12,6 +12,7 @@
 #include <memory>
 #include "../autogen_base.h"
 #include "spacetimedb/bsatn/bsatn.h"
+#include "RawVectorIndexV9.g.h"
 
 namespace SpacetimeDB::Internal {
 
@@ -46,6 +47,7 @@ SPACETIMEDB_INTERNAL_PRODUCT_TYPE(RawIndexAlgorithmDirectData) {
 SPACETIMEDB_INTERNAL_TAGGED_ENUM(RawIndexAlgorithm, 
     SpacetimeDB::Internal::RawIndexAlgorithmBTreeData,
     SpacetimeDB::Internal::RawIndexAlgorithmHashData,
-    SpacetimeDB::Internal::RawIndexAlgorithmDirectData
+    SpacetimeDB::Internal::RawIndexAlgorithmDirectData,
+    SpacetimeDB::Internal::RawVectorIndexV9
 )
 } // namespace SpacetimeDB::Internal

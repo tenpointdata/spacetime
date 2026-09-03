@@ -12,11 +12,13 @@
 #include <memory>
 #include "../autogen_base.h"
 #include "spacetimedb/bsatn/bsatn.h"
-#include "RawModuleDefV10.g.h"
-#include "RawModuleDefV8.g.h"
-#include "RawModuleDefV9.g.h"
 
 namespace SpacetimeDB::Internal {
 
-SPACETIMEDB_INTERNAL_TAGGED_ENUM(RawModuleDef, SpacetimeDB::Internal::RawModuleDefV8, SpacetimeDB::Internal::RawModuleDefV9, SpacetimeDB::Internal::RawModuleDefV10)
+enum class RawVectorMetric : uint8_t {
+    L2 = 0,
+    Cosine = 1,
+    DotProduct = 2,
+    L1 = 3,
+};
 } // namespace SpacetimeDB::Internal

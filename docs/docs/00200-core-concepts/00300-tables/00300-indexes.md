@@ -24,12 +24,17 @@ Primary keys and unique constraints automatically create indexes. You do not nee
 
 ## Index Types
 
-SpacetimeDB supports two index types:
+SpacetimeDB supports three index types:
 
 | Type | Use Case | Key Types | Multi-Column |
 |------|----------|-----------|--------------|
 | B-tree | General purpose | Any | Yes |
 | Direct | Dense integer sequences | `u8`, `u16`, `u32`, `u64` | No |
+| Vector | Similarity search over embeddings | `Vec<f32>` | No |
+
+B-tree and direct indexes answer *"which rows have this key?"*. A vector index answers a
+different question — *"which rows are most similar to this one?"* — and is covered in
+[Vector Indexes](#vector-indexes) below.
 
 ### Supported Column Types
 
@@ -49,7 +54,7 @@ The following types are **not** supported as index keys:
 |------|--------|
 | `f32`, `f64` | Floating-point values do not have a total ordering (`NaN` is not comparable) |
 | `ScheduleAt`, `TimeDuration`, `Timestamp` | Not yet supported ([#2650](https://github.com/clockworklabs/SpacetimeDB/issues/2650)) |
-| `Vec<T>`, arrays | Variable-length collections are not indexable |
+| `Vec<T>`, arrays | Variable-length collections are not indexable as *keys*. `Vec<f32>` can be indexed for [similarity search](#vector-indexes). |
 | Enums with payloads | Only no-payload (C-style) enums are supported |
 | Nested structs | Product types cannot be used as index keys |
 
@@ -629,6 +634,165 @@ log::info!("Deleted {} minor(s)", deleted);
 </TabItem>
 </Tabs>
 
+## Vector Indexes
+
+A vector index turns a table of embeddings into a vector database: given a query vector, it
+returns the `k` rows whose vectors are most similar, without scanning the table.
+
+This is what powers semantic search, retrieval-augmented generation, recommendations, and
+deduplication. You store the output of an embedding model in a `Vec<f32>` column, and
+SpacetimeDB finds the nearest ones.
+
+### Defining a Vector Index
+
+<Tabs groupId="module-language">
+<TabItem value="rust" label="Rust" default>
+
+```rust
+#[spacetimedb::table(
+    accessor = document,
+    public,
+    index(accessor = by_embedding, vector(column = embedding, dimension = 768, metric = cosine))
+)]
+pub struct Document {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    embedding: Vec<f32>,
+    text: String,
+}
+```
+
+</TabItem>
+</Tabs>
+
+The indexed column must have type `Vec<f32>`. Three parameters configure the index:
+
+| Parameter | Required | Meaning |
+|-----------|----------|---------|
+| `column` | yes | The `Vec<f32>` column to index. Exactly one; there is no meaningful way to combine similarity across several columns. |
+| `dimension` | yes | How many components every vector in the column has. |
+| `metric` | no | How similarity is measured. Defaults to `l2`. |
+
+`dimension` is required because a `Vec<f32>` column cannot express its own length — the
+type system has no fixed-size array — so the index has to be told, and enforces it from
+then on.
+
+:::note
+Vector indexes are currently available in Rust modules only.
+:::
+
+### Choosing a Metric
+
+Every metric is expressed as a *distance*: smaller means more similar.
+
+| Metric | Formula | Use it when |
+|--------|---------|-------------|
+| `l2` (default) | `sqrt(sum((a - b)^2))` | The magnitude of an embedding carries meaning. Also called Euclidean distance. |
+| `cosine` | `1 - cos(a, b)` | Comparing by direction rather than magnitude. **The usual choice for text embeddings.** |
+| `dot_product` | `-(a . b)` | The model was trained with a dot-product objective. Ranks by *largest* inner product. |
+| `l1` | `sum(\|a - b\|)` | Manhattan distance. |
+
+Use the metric your embedding model was trained for. Most text embedding models (OpenAI,
+Cohere, sentence-transformers) are trained for cosine similarity.
+
+A zero vector has no direction, so its cosine distance to anything is defined as `1.0`
+(orthogonal) rather than `NaN`.
+
+### Searching
+
+<Tabs groupId="module-language">
+<TabItem value="rust" label="Rust" default>
+
+```rust
+#[spacetimedb::reducer]
+pub fn find_similar(ctx: &ReducerContext, query: Vec<f32>) {
+    // The 10 most similar documents, most similar first.
+    for doc in ctx.db.document().by_embedding().search(&query, 10) {
+        log::info!("{}", doc.text);
+    }
+}
+```
+
+</TabItem>
+</Tabs>
+
+`search` returns at most `k` rows, ordered nearest first, and fewer if the table holds
+fewer. Rows written earlier in the same transaction are included; rows deleted in it are
+not.
+
+The query vector must have the index's declared dimension and contain only finite numbers.
+A `NaN` or an infinity has no defined distance to anything, so `search` panics rather than
+returning a meaningless ranking.
+
+### Exact and Approximate Search
+
+By default a vector index is **exact**: it compares the query against every indexed vector
+and returns the true nearest neighbours, every time.
+
+That is faster than it sounds. The vectors are stored end to end in a single allocation, so
+a search is one sequential pass over contiguous memory rather than a walk over rows — a few
+hundred thousand embeddings are handled in single-digit milliseconds. Start here.
+
+When a linear pass stops fitting your latency budget, add `hnsw` to switch that index to an
+approximate graph search:
+
+<Tabs groupId="module-language">
+<TabItem value="rust" label="Rust" default>
+
+```rust
+#[spacetimedb::table(
+    accessor = document,
+    index(accessor = by_embedding,
+          vector(column = embedding, dimension = 768, metric = cosine,
+                 hnsw(m = 16, ef_construction = 200, ef_search = 64)))
+)]
+pub struct Document { /* ... */ }
+```
+
+</TabItem>
+</Tabs>
+
+HNSW ("Hierarchical Navigable Small World") builds a layered proximity graph, turning a
+linear scan into something closer to logarithmic. All three parameters are optional and
+default to the values shown:
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `m` | 16 | Edges kept per node per layer. Higher means better recall and more memory — roughly `2 * m * 4` bytes per vector. |
+| `ef_construction` | 200 | Search width while inserting. Higher builds a better graph, more slowly. |
+| `ef_search` | 64 | Search width while querying. Higher means better recall and slower queries. |
+
+The trade-off is real: an approximate search occasionally misses a true neighbour. Typical
+recall at the default settings is above 95%.
+
+:::caution
+An HNSW graph is shaped by the order rows were inserted in. Replicas replaying the same
+commitlog stay in lockstep, but a graph rebuilt from a snapshot may differ from the one it
+replaced, and can return a slightly different set of neighbours. Exact search has no such
+caveat — its results depend only on which rows are in the table. If a reducer writes rows
+derived from search results, prefer exact search.
+:::
+
+### What a Vector Index Cannot Do
+
+A vector index has no keys, so it does not answer the queries the other index types do:
+
+- It cannot be used for equality or range filters. An index on the same column of another
+  type handles those; you can declare both.
+- It cannot back a `#[unique]` constraint or a primary key.
+- It is not used by SQL. Nearest-neighbour search is reached through the generated
+  `search` accessor from a module.
+
+### Rows That Cannot Be Indexed
+
+Because a `Vec<f32>` column cannot constrain its own length, a row can be inserted carrying
+a vector of the wrong dimension, or one containing `NaN`. Such a row is stored normally but
+is left out of search results — a vector of a different dimension has no defined distance
+to the query, so it is not a neighbour of anything.
+
+If you want a hard failure instead, check the length before inserting.
+
 ## Index Design Guidelines
 
 **Choose columns based on query patterns.** Index the columns that appear in your WHERE clauses and JOIN conditions. An unused index wastes memory.
@@ -638,6 +802,10 @@ log::info!("Deleted {} minor(s)", deleted);
 **Avoid redundant indexes.** A multi-column index on `(a, b)` makes a separate index on `(a)` redundant, since the multi-column index handles prefix queries. However, an index on `(b)` is not redundant if you query `b` independently.
 
 **Balance read and write performance.** Each index speeds up reads but slows down writes. Tables with high write volume and few reads may benefit from fewer indexes.
+
+**Budget memory for vector indexes.** A vector index holds a copy of every embedding:
+`dimension * 4` bytes per row, plus roughly `2 * m * 4` more per row if it is an HNSW
+index. At 768 dimensions that is about 3 KB per row before the graph.
 
 ## Next Steps
 

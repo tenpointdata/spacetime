@@ -19,7 +19,7 @@ use spacetimedb_schema::{
     schema::TableSchema,
 };
 use spacetimedb_schema::{
-    def::{IndexDef, TableDef, TypeDef},
+    def::{IndexAlgorithm, IndexDef, TableDef, TypeDef},
     type_for_generate::TypespaceForGenerate,
 };
 use spacetimedb_schema::{
@@ -209,8 +209,19 @@ pub(super) fn iter_unique_cols<'a>(
     })
 }
 
+/// Iterate over the indexes a client can use, in a deterministic order.
+///
+/// Vector indexes are skipped. Client SDKs expose an index as a typed key lookup, and a
+/// vector index has no key: it ranks whole embeddings by distance, which is answered by the
+/// host inside a transaction and has no client-side equivalent. Emitting one anyway would
+/// produce a key accessor over `Vec<f32>` — code that does not compile in C# (the key type
+/// must be `IEquatable` and `IComparable`) and that would be meaningless where it does.
 pub(super) fn iter_indexes(table: &TableDef) -> impl Iterator<Item = &IndexDef> {
-    table.indexes.values().sorted_by_key(|index| &index.name)
+    table
+        .indexes
+        .values()
+        .filter(|index| !matches!(index.algorithm, IndexAlgorithm::Vector(_)))
+        .sorted_by_key(|index| &index.name)
 }
 
 pub(super) fn iter_constraints(table: &TableDef) -> impl Iterator<Item = &ConstraintDef> {
