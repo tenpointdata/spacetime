@@ -36,6 +36,7 @@ spacetimedb-primitives.workspace = true
 spacetimedb-sats = { workspace = true, features = ["blake3"] }
 spacetimedb-lib = { workspace = true, features = ["memory-usage"] }
 spacetimedb-schema.workspace = true
+spacetimedb-vector.workspace = true
 
 ahash.workspace = true
 blake3.workspace = true

@@ -8039,6 +8039,7 @@ dependencies = [
  "spacetimedb-schema",
  "spacetimedb-snapshot",
  "spacetimedb-table",
+ "spacetimedb-vector",
  "strum",
  "thin-vec",
  "thiserror 1.0.69",
@@ -8435,6 +8436,7 @@ dependencies = [
  "spacetimedb-primitives",
  "spacetimedb-sats",
  "spacetimedb-testing",
+ "spacetimedb-vector",
  "termcolor",
  "thiserror 1.0.69",
  "unicode-ident",
@@ -8617,6 +8619,7 @@ dependencies = [
  "spacetimedb-primitives",
  "spacetimedb-sats",
  "spacetimedb-schema",
+ "spacetimedb-vector",
  "thiserror 1.0.69",
 ]
 
@@ -8675,6 +8678,14 @@ dependencies = [
  "tracing",
  "windows-sys 0.59.0",
  "zip",
+]
+
+[[package]]
+name = "spacetimedb-vector"
+version = "2.9.0"
+dependencies = [
+ "proptest",
+ "spacetimedb-memory-usage",
 ]
 
 [[package]]

@@ -41,7 +41,8 @@ use spacetimedb_lib::db::raw_def::v9::{
     Lifecycle, RawColumnDefaultValueV9, RawConstraintDataV9, RawConstraintDefV9, RawIndexAlgorithm, RawIndexDefV9,
     RawMiscModuleExportV9, RawModuleDefV9, RawProcedureDefV9, RawReducerDefV9, RawRowLevelSecurityDefV9,
     RawScheduleDefV9, RawScopedTypeNameV9, RawSequenceDefV9, RawSql, RawTableDefV9, RawTypeDefV9,
-    RawUniqueConstraintDataV9, RawViewDefV9, TableAccess, TableType,
+    RawHnswParamsV9, RawUniqueConstraintDataV9, RawVectorIndexV9, RawVectorMetric, RawVectorStrategy,
+    RawViewDefV9, TableAccess, TableType,
 };
 use spacetimedb_lib::db::view::{extract_view_return_product_type_ref, ViewKind};
 use spacetimedb_lib::{ProductType, RawModuleDef};
@@ -50,6 +51,7 @@ use spacetimedb_primitives::{
 };
 use spacetimedb_sats::raw_identifier::RawIdentifier;
 use spacetimedb_sats::{AlgebraicType, AlgebraicTypeRef, AlgebraicValue, Typespace};
+use spacetimedb_vector::{DistanceMetric, HnswParams};
 
 pub mod deserialize;
 pub mod error;
@@ -1543,6 +1545,7 @@ impl From<IndexDef> for RawIndexDefV9 {
                 IndexAlgorithm::BTree(BTreeAlgorithm { columns }) => RawIndexAlgorithm::BTree { columns },
                 IndexAlgorithm::Hash(HashAlgorithm { columns }) => RawIndexAlgorithm::Hash { columns },
                 IndexAlgorithm::Direct(DirectAlgorithm { column }) => RawIndexAlgorithm::Direct { column },
+                IndexAlgorithm::Vector(vector) => vector.into(),
             },
             accessor_name: val.accessor_name.map(Into::into),
         }
@@ -1569,6 +1572,9 @@ pub enum IndexAlgorithm {
     Hash(HashAlgorithm),
     /// Implemented using `DirectUniqueIndex`.
     Direct(DirectAlgorithm),
+    /// Implemented using a vector similarity index, for nearest-neighbour search over
+    /// embeddings. Supports neither point nor range scans.
+    Vector(VectorAlgorithm),
 }
 
 impl spacetimedb_memory_usage::MemoryUsage for IndexAlgorithm {
@@ -1577,6 +1583,7 @@ impl spacetimedb_memory_usage::MemoryUsage for IndexAlgorithm {
             Self::BTree(a) => a.heap_usage(),
             Self::Direct(a) => a.heap_usage(),
             Self::Hash(a) => a.heap_usage(),
+            Self::Vector(a) => a.heap_usage(),
         }
     }
 }
@@ -1588,6 +1595,7 @@ impl IndexAlgorithm {
             Self::BTree(btree) => ColOrCols::ColList(&btree.columns),
             Self::Hash(hash) => ColOrCols::ColList(&hash.columns),
             Self::Direct(direct) => ColOrCols::Col(direct.column),
+            Self::Vector(vector) => ColOrCols::Col(vector.column),
         }
     }
     /// Find the column index for a given field.
@@ -1604,7 +1612,136 @@ impl From<IndexAlgorithm> for RawIndexAlgorithm {
             IndexAlgorithm::BTree(BTreeAlgorithm { columns }) => Self::BTree { columns },
             IndexAlgorithm::Hash(HashAlgorithm { columns }) => Self::Hash { columns },
             IndexAlgorithm::Direct(DirectAlgorithm { column }) => Self::Direct { column },
+            IndexAlgorithm::Vector(vector) => vector.into(),
         }
+    }
+}
+
+/// Data specifying a vector similarity index.
+///
+/// The indexed column holds `Vec<f32>` embeddings; the index answers "which `k` rows are
+/// most similar to this vector?" rather than the key lookups the other algorithms serve.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct VectorAlgorithm {
+    /// The column to index. Its type must be `Array(F32)`.
+    pub column: ColId,
+
+    /// The number of components every vector in the column must have.
+    ///
+    /// SATS cannot express a fixed-size array, so the dimensionality lives here and is
+    /// enforced by the index rather than by the column's type.
+    pub dimension: u32,
+
+    /// How similarity between two vectors is measured.
+    pub metric: DistanceMetric,
+
+    /// Whether searches are exhaustive or approximate.
+    pub strategy: VectorStrategy,
+}
+
+impl spacetimedb_memory_usage::MemoryUsage for VectorAlgorithm {}
+
+/// How a [`VectorAlgorithm`] index searches.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum VectorStrategy {
+    /// Compare the query against every indexed vector, returning the true nearest
+    /// neighbours. The default.
+    #[default]
+    Exact,
+    /// Search an HNSW proximity graph, trading exactness for speed.
+    Hnsw(HnswParams),
+}
+
+impl VectorAlgorithm {
+    /// Whether searches against this index are approximate.
+    pub fn is_approximate(&self) -> bool {
+        matches!(self.strategy, VectorStrategy::Hnsw(_))
+    }
+}
+
+impl From<VectorAlgorithm> for RawVectorIndexV9 {
+    fn from(val: VectorAlgorithm) -> Self {
+        Self {
+            column: val.column,
+            dimension: val.dimension,
+            metric: match val.metric {
+                DistanceMetric::L2 => RawVectorMetric::L2,
+                DistanceMetric::Cosine => RawVectorMetric::Cosine,
+                DistanceMetric::DotProduct => RawVectorMetric::DotProduct,
+                DistanceMetric::L1 => RawVectorMetric::L1,
+            },
+            strategy: match val.strategy {
+                VectorStrategy::Exact => RawVectorStrategy::Exact,
+                VectorStrategy::Hnsw(p) => RawVectorStrategy::Hnsw(RawHnswParamsV9 {
+                    // The raw form is `u16` to keep the ABI compact; `HnswParams::normalized`
+                    // has already clamped these well below `u16::MAX`.
+                    m: p.m.min(u16::MAX as usize) as u16,
+                    ef_construction: p.ef_construction.min(u16::MAX as usize) as u16,
+                    ef_search: p.ef_search.min(u16::MAX as usize) as u16,
+                }),
+            },
+        }
+    }
+}
+
+impl From<VectorAlgorithm> for RawIndexAlgorithm {
+    fn from(val: VectorAlgorithm) -> Self {
+        Self::Vector(val.into())
+    }
+}
+
+impl From<RawVectorIndexV9> for IndexAlgorithm {
+    fn from(raw: RawVectorIndexV9) -> Self {
+        Self::Vector(raw.into())
+    }
+}
+
+impl From<VectorAlgorithm> for IndexAlgorithm {
+    fn from(val: VectorAlgorithm) -> Self {
+        Self::Vector(val)
+    }
+}
+
+impl From<RawVectorIndexV9> for VectorAlgorithm {
+    fn from(raw: RawVectorIndexV9) -> Self {
+        Self {
+            column: raw.column,
+            dimension: raw.dimension,
+            metric: distance_metric_from_raw(raw.metric),
+            strategy: vector_strategy_from_raw(raw.strategy),
+        }
+    }
+}
+
+/// Converts a raw metric into the one the vector engine uses.
+pub fn distance_metric_from_raw(raw: RawVectorMetric) -> DistanceMetric {
+    match raw {
+        RawVectorMetric::L2 => DistanceMetric::L2,
+        RawVectorMetric::Cosine => DistanceMetric::Cosine,
+        RawVectorMetric::DotProduct => DistanceMetric::DotProduct,
+        RawVectorMetric::L1 => DistanceMetric::L1,
+        // `RawVectorMetric` is `#[non_exhaustive]` so that new metrics can be added
+        // without breaking the ABI. A module built against a newer ABI than this host
+        // falls back to the default rather than failing to publish.
+        _ => DistanceMetric::default(),
+    }
+}
+
+/// Converts a raw search strategy into its validated form.
+pub fn vector_strategy_from_raw(raw: RawVectorStrategy) -> VectorStrategy {
+    match raw {
+        RawVectorStrategy::Exact => VectorStrategy::Exact,
+        RawVectorStrategy::Hnsw(p) => VectorStrategy::Hnsw(
+            HnswParams {
+                m: p.m as usize,
+                ef_construction: p.ef_construction as usize,
+                ef_search: p.ef_search as usize,
+                ..HnswParams::default()
+            }
+            .normalized(),
+        ),
+        // See `distance_metric_from_raw` for why this falls back rather than failing.
+        _ => VectorStrategy::Exact,
     }
 }
 

@@ -512,6 +512,9 @@ impl TableSchema {
                 IndexAlgorithm::BTree(btree) => (btree.columns.clone(), Constraints::indexed()),
                 IndexAlgorithm::Hash(hash) => (hash.columns.clone(), Constraints::indexed()),
                 IndexAlgorithm::Direct(direct) => (direct.column.into(), Constraints::indexed()),
+                // A vector index is "indexed" in the same backwards-compatible sense: the
+                // column has an index on it, even though it answers a different question.
+                IndexAlgorithm::Vector(vector) => (vector.column.into(), Constraints::indexed()),
             }))
             .chain(
                 self.sequences

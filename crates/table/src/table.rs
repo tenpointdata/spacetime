@@ -2555,7 +2555,7 @@ pub(crate) mod test {
     use spacetimedb_primitives::TableId;
     use spacetimedb_sats::bsatn::to_vec;
     use spacetimedb_sats::proptest::{generate_typed_row, generate_typed_row_vec, SIZE};
-    use spacetimedb_sats::{product, AlgebraicType, ArrayValue};
+    use spacetimedb_sats::{product, AlgebraicType, ArrayValue, F32};
     use spacetimedb_schema::def::{BTreeAlgorithm, ModuleDef};
     use spacetimedb_schema::schema::Schema as _;
 
@@ -2927,6 +2927,294 @@ pub(crate) mod test {
             is_unique: bool
         ) {
             test_index_size_reporting(ty, vals, [0, 1].into(), index_kind, is_unique)?
+        }
+    }
+
+    /// Tests for vector (nearest-neighbour) indexes, exercised through the real
+    /// `Table` insert/delete paths rather than against `TableIndex` in isolation, so that
+    /// index maintenance is covered too.
+    mod vector {
+        use super::*;
+        use spacetimedb_schema::def::{VectorAlgorithm, VectorStrategy};
+        use spacetimedb_vector::{DistanceMetric, HnswParams};
+
+        /// A table of `(id: u64, embedding: Vec<f32>)`.
+        fn row_type() -> ProductType {
+            ProductType::from([AlgebraicType::U64, AlgebraicType::array(AlgebraicType::F32)])
+        }
+
+        fn row(id: u64, embedding: &[f32]) -> ProductValue {
+            let embedding: Box<[F32]> = embedding.iter().map(|c| F32::from(*c)).collect();
+            product![id, AlgebraicValue::Array(ArrayValue::F32(embedding))]
+        }
+
+        fn algorithm(dimension: u32, metric: DistanceMetric, strategy: VectorStrategy) -> IndexKind {
+            IndexKind::Vector(VectorAlgorithm {
+                column: 1.into(),
+                dimension,
+                metric,
+                strategy,
+            })
+        }
+
+        /// Builds a table with a vector index on column 1 and the given rows inserted.
+        fn setup_vector_table(
+            dimension: u32,
+            metric: DistanceMetric,
+            strategy: VectorStrategy,
+            rows: &[(u64, Vec<f32>)],
+        ) -> (Table, HashMapBlobStore, IndexId) {
+            let ty = row_type();
+            let pool = PagePool::new_for_test();
+            let mut blob_store = HashMapBlobStore::default();
+            let mut table = table(ty.clone());
+
+            let index_id = IndexId::SENTINEL;
+            let index = TableIndex::new(&ty, [1].into(), algorithm(dimension, metric, strategy), false).unwrap();
+            // SAFETY: `index` was constructed with `table`'s row type.
+            unsafe { table.insert_index(&blob_store, index_id, index) }.unwrap();
+
+            for (id, embedding) in rows {
+                table.insert(&pool, &mut blob_store, &row(*id, embedding)).unwrap();
+            }
+            (table, blob_store, index_id)
+        }
+
+        /// The ids of the `k` nearest rows to `query`, nearest first.
+        fn nearest(table: &Table, blob_store: &dyn BlobStore, index_id: IndexId, query: &[f32], k: usize) -> Vec<u64> {
+            let index = table.get_index_by_id(index_id).unwrap();
+            index
+                .search_knn(query, k, |_| true)
+                .unwrap()
+                .into_iter()
+                .map(|n| {
+                    // SAFETY: the pointer came out of the index, so its row is present.
+                    let row_ref = unsafe { table.get_row_ref_unchecked(blob_store, n.payload) };
+                    row_ref.read_col::<u64>(ColId(0)).unwrap()
+                })
+                .collect()
+        }
+
+        #[test]
+        fn finds_nearest_neighbours_through_the_table() {
+            let rows = [
+                (1, vec![1.0, 0.0]),
+                (2, vec![0.9, 0.1]),
+                (3, vec![0.0, 1.0]),
+                (4, vec![-1.0, 0.0]),
+            ];
+            let (table, bs, id) = setup_vector_table(2, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+            assert_eq!(nearest(&table, &bs, id, &[1.0, 0.0], 3), vec![1, 2, 3]);
+            assert_eq!(nearest(&table, &bs, id, &[-1.0, 0.0], 1), vec![4]);
+        }
+
+        #[test]
+        fn cosine_ranks_by_direction() {
+            let rows = [(1, vec![50.0, 0.0]), (2, vec![0.0, 0.1]), (3, vec![-3.0, 0.0])];
+            let (table, bs, id) = setup_vector_table(2, DistanceMetric::Cosine, VectorStrategy::Exact, &rows);
+            assert_eq!(nearest(&table, &bs, id, &[1.0, 0.0], 3), vec![1, 2, 3]);
+        }
+
+        #[test]
+        fn an_hnsw_index_also_works_through_the_table() {
+            let rows: Vec<(u64, Vec<f32>)> = (0..200u64)
+                .map(|i| (i, vec![i as f32, (i % 7) as f32, (i % 13) as f32]))
+                .collect();
+            let strategy = VectorStrategy::Hnsw(HnswParams::default());
+            let (table, bs, id) = setup_vector_table(3, DistanceMetric::L2, strategy, &rows);
+
+            let index = table.get_index_by_id(id).unwrap();
+            assert!(index.as_vector().unwrap().is_approximate());
+            // Each row should still find itself, which is the easy case a broken graph fails.
+            for (i, embedding) in &rows {
+                assert_eq!(nearest(&table, &bs, id, embedding, 1), vec![*i], "row {i}");
+            }
+        }
+
+        #[test]
+        fn deleting_a_row_removes_it_from_the_index() {
+            let rows = [(1, vec![1.0]), (2, vec![2.0]), (3, vec![3.0])];
+            let (mut table, mut bs, id) = setup_vector_table(1, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+            assert_eq!(nearest(&table, &bs, id, &[0.0], 3), vec![1, 2, 3]);
+
+            let ptr = table.get_index_by_id(id).unwrap().search_knn(&[2.0], 1, |_| true).unwrap()[0].payload;
+            table.delete(&mut bs, ptr, |_| ());
+
+            assert_eq!(nearest(&table, &bs, id, &[0.0], 3), vec![1, 3]);
+            assert_eq!(table.get_index_by_id(id).unwrap().num_rows(), 2);
+        }
+
+        #[test]
+        fn clearing_the_table_clears_the_index() {
+            let rows = [(1, vec![1.0]), (2, vec![2.0])];
+            let (mut table, mut bs, id) = setup_vector_table(1, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+            table.clear(&mut bs);
+            assert_eq!(table.get_index_by_id(id).unwrap().num_rows(), 0);
+            assert!(nearest(&table, &bs, id, &[0.0], 5).is_empty());
+        }
+
+        /// Building an index over rows that are already present must give the same result
+        /// as maintaining it incrementally. This is the path taken after a snapshot restore.
+        #[test]
+        fn building_the_index_over_existing_rows_matches_incremental_maintenance() {
+            let ty = row_type();
+            let pool = PagePool::new_for_test();
+            let mut blob_store = HashMapBlobStore::default();
+            let mut table = table(ty.clone());
+
+            let rows: Vec<(u64, Vec<f32>)> = (0..64u64).map(|i| (i, vec![i as f32, -(i as f32)])).collect();
+            for (id, embedding) in &rows {
+                table.insert(&pool, &mut blob_store, &row(*id, embedding)).unwrap();
+            }
+
+            let index_id = IndexId::SENTINEL;
+            let algo = algorithm(2, DistanceMetric::L2, VectorStrategy::Exact);
+            let index = TableIndex::new(&ty, [1].into(), algo, false).unwrap();
+            // SAFETY: `index` was constructed with `table`'s row type.
+            unsafe { table.insert_index(&blob_store, index_id, index) }.unwrap();
+
+            assert_eq!(table.get_index_by_id(index_id).unwrap().num_rows(), 64);
+            assert_eq!(nearest(&table, &blob_store, index_id, &[10.0, -10.0], 3), vec![10, 9, 11]);
+        }
+
+        /// A `Vec<f32>` column cannot express a length, so a row can carry a vector of the
+        /// wrong size. It must be accepted and excluded from results — never dropped, or
+        /// deleting it would leave a stale entry aliasing a recycled row pointer.
+        #[test]
+        fn a_wrong_dimension_row_is_accepted_but_not_searchable() {
+            let rows = [(1, vec![1.0, 1.0]), (2, vec![1.0]), (3, vec![2.0, 2.0])];
+            let (mut table, mut bs, id) = setup_vector_table(2, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+
+            let index = table.get_index_by_id(id).unwrap();
+            assert_eq!(index.num_rows(), 3, "every row must be accounted for");
+            assert_eq!(index.as_vector().unwrap().num_unindexed(), 1);
+            // `Table::num_rows_in_indexes` assumes every index holds every row.
+            assert_eq!(table.num_rows_in_indexes(), table.num_rows());
+
+            assert_eq!(nearest(&table, &bs, id, &[1.0, 1.0], 5), vec![1, 3]);
+
+            // And deleting it must still work.
+            let ptr = table
+                .scan_rows(&bs)
+                .find(|r| r.read_col::<u64>(ColId(0)).unwrap() == 2)
+                .unwrap()
+                .pointer();
+            table.delete(&mut bs, ptr, |_| ());
+            let index = table.get_index_by_id(id).unwrap();
+            assert_eq!(index.num_rows(), 2);
+            assert_eq!(index.as_vector().unwrap().num_unindexed(), 0);
+        }
+
+        /// A vector containing `NaN` has no meaningful distance to anything.
+        #[test]
+        fn a_non_finite_row_is_accepted_but_not_searchable() {
+            let rows = [(1, vec![1.0, 1.0]), (2, vec![f32::NAN, 0.0])];
+            let (table, bs, id) = setup_vector_table(2, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+            assert_eq!(table.get_index_by_id(id).unwrap().as_vector().unwrap().num_unindexed(), 1);
+            assert_eq!(nearest(&table, &bs, id, &[0.0, 0.0], 5), vec![1]);
+        }
+
+        /// Updating a row to carry a valid vector must clear its unindexed record.
+        #[test]
+        fn updating_a_row_moves_it_between_indexed_and_unindexed() {
+            let rows = [(1, vec![9.0]), (2, vec![1.0, 2.0])];
+            let (mut table, mut bs, id) = setup_vector_table(1, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+            assert_eq!(table.get_index_by_id(id).unwrap().as_vector().unwrap().num_unindexed(), 1);
+
+            // Replace the bad row with a good one at the same id.
+            let ptr = table
+                .scan_rows(&bs)
+                .find(|r| r.read_col::<u64>(ColId(0)).unwrap() == 2)
+                .unwrap()
+                .pointer();
+            table.delete(&mut bs, ptr, |_| ());
+            let pool = PagePool::new_for_test();
+            table.insert(&pool, &mut bs, &row(2, &[8.0])).unwrap();
+
+            let index = table.get_index_by_id(id).unwrap();
+            assert_eq!(index.as_vector().unwrap().num_unindexed(), 0);
+            assert_eq!(nearest(&table, &bs, id, &[8.2], 2), vec![2, 1]);
+        }
+
+        #[test]
+        fn a_vector_index_is_never_unique_or_ranged() {
+            let rows = [(1, vec![1.0])];
+            let (table, _bs, id) = setup_vector_table(1, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+            let index = table.get_index_by_id(id).unwrap();
+            assert!(index.is_vector());
+            assert!(!index.is_unique());
+            assert!(!index.is_ranged());
+            // Keeping the index non-unique is what preserves the table's pointer map.
+            assert!(!table.has_unique_index());
+        }
+
+        #[test]
+        fn a_keyed_index_rejects_a_nearest_neighbour_search() {
+            let ty = row_type();
+            let table = table(ty.clone());
+            let index = TableIndex::new(&ty, [0].into(), IndexKind::BTree, false).unwrap();
+            assert!(!index.is_vector());
+            assert!(index.as_vector().is_none());
+            assert_eq!(
+                index.search_knn(&[1.0], 1, |_| true).unwrap_err(),
+                crate::table_index::VectorSearchError::NotAVectorIndex
+            );
+            drop(table);
+        }
+
+        #[test]
+        fn a_malformed_query_is_rejected() {
+            let rows = [(1, vec![1.0, 2.0])];
+            let (table, _bs, id) = setup_vector_table(2, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+            let index = table.get_index_by_id(id).unwrap();
+            assert!(index.search_knn(&[1.0], 1, |_| true).is_err(), "wrong dimension");
+            assert!(index.search_knn(&[1.0, f32::NAN], 1, |_| true).is_err(), "non-finite");
+        }
+
+        /// The transaction layer hides rows it has deleted by filtering search candidates.
+        #[test]
+        fn the_filter_hides_rows() {
+            let rows = [(1, vec![1.0]), (2, vec![2.0]), (3, vec![3.0])];
+            let (table, bs, id) = setup_vector_table(1, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+            let index = table.get_index_by_id(id).unwrap();
+
+            let hidden = index.search_knn(&[1.0], 1, |_| true).unwrap()[0].payload;
+            let got: Vec<u64> = index
+                .search_knn(&[0.0], 3, |ptr| *ptr != hidden)
+                .unwrap()
+                .into_iter()
+                // SAFETY: the pointer came out of the index, so its row is present.
+                .map(|n| unsafe { table.get_row_ref_unchecked(&bs, n.payload) }.read_col::<u64>(ColId(0)).unwrap())
+                .collect();
+            assert_eq!(got, vec![2, 3]);
+        }
+
+        #[test]
+        fn clone_structure_keeps_the_configuration_but_no_rows() {
+            let rows = [(1, vec![1.0, 2.0, 3.0])];
+            let (table, _bs, id) = setup_vector_table(3, DistanceMetric::Cosine, VectorStrategy::Exact, &rows);
+            let fresh = table.get_index_by_id(id).unwrap().clone_structure();
+
+            assert!(fresh.is_vector());
+            assert_eq!(fresh.num_rows(), 0);
+            let vector = fresh.as_vector().unwrap();
+            assert_eq!(vector.dimension(), 3);
+            assert_eq!(vector.metric(), DistanceMetric::Cosine);
+            assert!(!vector.is_approximate());
+        }
+
+        /// Key bytes are what the `data_size` gauges report, so they must track the rows.
+        #[test]
+        fn key_bytes_track_the_indexed_vectors() {
+            let rows = [(1, vec![1.0, 2.0, 3.0, 4.0]), (2, vec![5.0, 6.0, 7.0, 8.0])];
+            let (mut table, mut bs, id) = setup_vector_table(4, DistanceMetric::L2, VectorStrategy::Exact, &rows);
+            assert_eq!(table.get_index_by_id(id).unwrap().num_key_bytes(), 2 * 4 * 4);
+            assert_eq!(table.bytes_used_by_index_keys(), 2 * 4 * 4);
+
+            let ptr = table.get_index_by_id(id).unwrap().search_knn(&[1.0, 2.0, 3.0, 4.0], 1, |_| true).unwrap()[0]
+                .payload;
+            table.delete(&mut bs, ptr, |_| ());
+            assert_eq!(table.get_index_by_id(id).unwrap().num_key_bytes(), 4 * 4);
         }
     }
 
