@@ -61,7 +61,8 @@ pub use spacetimedb_primitives::TableId;
 pub use sys::Errno;
 pub use table::{
     AutoIncOverflow, PointIndex, PointIndexReadOnly, RangedIndex, RangedIndexReadOnly, Table, TryInsertError,
-    UniqueColumn, UniqueColumnReadOnly, UniqueConstraintViolation,
+    UniqueColumn, UniqueColumnReadOnly, UniqueConstraintViolation, VectorIndex, VectorIndexReadOnly, VectorMetric,
+    VectorStrategy,
 };
 
 pub type ReducerResult = core::result::Result<(), Box<str>>;

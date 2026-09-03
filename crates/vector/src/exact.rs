@@ -154,9 +154,12 @@ impl<P: Copy + Eq + Hash + Ord> ExactVectorIndex<P> {
             if !keep(&payload) {
                 continue;
             }
-            let rank = self
-                .metric
-                .rank(query, self.store.vector_unchecked(slot), inv_norm_query, self.store.inv_norm(slot));
+            let rank = self.metric.rank(
+                query,
+                self.store.vector_unchecked(slot),
+                inv_norm_query,
+                self.store.inv_norm(slot),
+            );
             top.offer(rank, payload);
         }
 

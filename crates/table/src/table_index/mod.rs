@@ -66,11 +66,11 @@ mod hash_index;
 mod index;
 mod key_size;
 mod same_key_entry;
-mod vector_index;
 pub mod unique_btree_index;
 pub mod unique_direct_fixed_cap_index;
 pub mod unique_direct_index;
 mod unique_hash_index;
+mod vector_index;
 
 pub use self::index::{Index, IndexCannotSeekRange, IndexSeekRangeResult, RangedIndex};
 pub use self::key_size::KeySize;
@@ -2766,7 +2766,10 @@ impl TableIndex {
         use TypedIndex::*;
         let (IndexImpl::Keyed(this), IndexImpl::Keyed(other)) = (&self.idx, &other.idx) else {
             // A vector index has no uniqueness to violate, so two of them always merge.
-            debug_assert!(self.is_vector() && other.is_vector(), "merging indexes of different kinds");
+            debug_assert!(
+                self.is_vector() && other.is_vector(),
+                "merging indexes of different kinds"
+            );
             return Ok(());
         };
         match (this, other) {

@@ -75,9 +75,7 @@ pub enum ValidationError {
         column: RawIdentifier,
         ty: PrettyAlgebraicType,
     },
-    #[error(
-        "vector index `{index}` declares dimension {dimension}, which must be between 1 and {max} inclusive"
-    )]
+    #[error("vector index `{index}` declares dimension {dimension}, which must be between 1 and {max} inclusive")]
     VectorIndexBadDimension {
         index: RawIdentifier,
         dimension: u32,

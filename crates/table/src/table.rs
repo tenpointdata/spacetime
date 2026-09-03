@@ -1614,18 +1614,25 @@ impl Table {
     }
 
     /// Returns the first [`TableIndex`] with the given [`ColList`].
+    ///
+    /// Vector indexes are skipped. Callers look an index up by columns in order to do a
+    /// key lookup with it — an equality scan, a range scan, a cardinality estimate, or to
+    /// back a unique constraint — and a vector index can do none of those. A table with
+    /// both a btree and a vector index on the same column must yield the btree.
     pub fn get_index_by_cols(&self, cols: &ColList) -> Option<(IndexId, &TableIndex)> {
         self.indexes
             .iter()
-            .find(|(_, index)| index.indexed_columns() == cols)
+            .find(|(_, index)| !index.is_vector() && index.indexed_columns() == cols)
             .map(|(id, idx)| (*id, idx))
     }
 
     /// Returns all [`TableIndex`]es with the given [`ColList`].
+    ///
+    /// Vector indexes are skipped, for the reasons given on [`Self::get_index_by_cols`].
     pub fn get_indexes_by_cols(&self, cols: &ColList) -> Vec<(IndexId, &TableIndex)> {
         self.indexes
             .iter()
-            .filter(|(_, index)| index.indexed_columns() == cols)
+            .filter(|(_, index)| !index.is_vector() && index.indexed_columns() == cols)
             .map(|(id, idx)| (*id, idx))
             .collect()
     }
@@ -3037,7 +3044,12 @@ pub(crate) mod test {
             let (mut table, mut bs, id) = setup_vector_table(1, DistanceMetric::L2, VectorStrategy::Exact, &rows);
             assert_eq!(nearest(&table, &bs, id, &[0.0], 3), vec![1, 2, 3]);
 
-            let ptr = table.get_index_by_id(id).unwrap().search_knn(&[2.0], 1, |_| true).unwrap()[0].payload;
+            let ptr = table
+                .get_index_by_id(id)
+                .unwrap()
+                .search_knn(&[2.0], 1, |_| true)
+                .unwrap()[0]
+                .payload;
             table.delete(&mut bs, ptr, |_| ());
 
             assert_eq!(nearest(&table, &bs, id, &[0.0], 3), vec![1, 3]);
@@ -3074,7 +3086,10 @@ pub(crate) mod test {
             unsafe { table.insert_index(&blob_store, index_id, index) }.unwrap();
 
             assert_eq!(table.get_index_by_id(index_id).unwrap().num_rows(), 64);
-            assert_eq!(nearest(&table, &blob_store, index_id, &[10.0, -10.0], 3), vec![10, 9, 11]);
+            assert_eq!(
+                nearest(&table, &blob_store, index_id, &[10.0, -10.0], 3),
+                vec![10, 9, 11]
+            );
         }
 
         /// A `Vec<f32>` column cannot express a length, so a row can carry a vector of the
@@ -3110,7 +3125,10 @@ pub(crate) mod test {
         fn a_non_finite_row_is_accepted_but_not_searchable() {
             let rows = [(1, vec![1.0, 1.0]), (2, vec![f32::NAN, 0.0])];
             let (table, bs, id) = setup_vector_table(2, DistanceMetric::L2, VectorStrategy::Exact, &rows);
-            assert_eq!(table.get_index_by_id(id).unwrap().as_vector().unwrap().num_unindexed(), 1);
+            assert_eq!(
+                table.get_index_by_id(id).unwrap().as_vector().unwrap().num_unindexed(),
+                1
+            );
             assert_eq!(nearest(&table, &bs, id, &[0.0, 0.0], 5), vec![1]);
         }
 
@@ -3119,7 +3137,10 @@ pub(crate) mod test {
         fn updating_a_row_moves_it_between_indexed_and_unindexed() {
             let rows = [(1, vec![9.0]), (2, vec![1.0, 2.0])];
             let (mut table, mut bs, id) = setup_vector_table(1, DistanceMetric::L2, VectorStrategy::Exact, &rows);
-            assert_eq!(table.get_index_by_id(id).unwrap().as_vector().unwrap().num_unindexed(), 1);
+            assert_eq!(
+                table.get_index_by_id(id).unwrap().as_vector().unwrap().num_unindexed(),
+                1
+            );
 
             // Replace the bad row with a good one at the same id.
             let ptr = table
@@ -3184,7 +3205,11 @@ pub(crate) mod test {
                 .unwrap()
                 .into_iter()
                 // SAFETY: the pointer came out of the index, so its row is present.
-                .map(|n| unsafe { table.get_row_ref_unchecked(&bs, n.payload) }.read_col::<u64>(ColId(0)).unwrap())
+                .map(|n| {
+                    unsafe { table.get_row_ref_unchecked(&bs, n.payload) }
+                        .read_col::<u64>(ColId(0))
+                        .unwrap()
+                })
                 .collect();
             assert_eq!(got, vec![2, 3]);
         }
@@ -3211,7 +3236,11 @@ pub(crate) mod test {
             assert_eq!(table.get_index_by_id(id).unwrap().num_key_bytes(), 2 * 4 * 4);
             assert_eq!(table.bytes_used_by_index_keys(), 2 * 4 * 4);
 
-            let ptr = table.get_index_by_id(id).unwrap().search_knn(&[1.0, 2.0, 3.0, 4.0], 1, |_| true).unwrap()[0]
+            let ptr = table
+                .get_index_by_id(id)
+                .unwrap()
+                .search_knn(&[1.0, 2.0, 3.0, 4.0], 1, |_| true)
+                .unwrap()[0]
                 .payload;
             table.delete(&mut bs, ptr, |_| ());
             assert_eq!(table.get_index_by_id(id).unwrap().num_key_bytes(), 4 * 4);

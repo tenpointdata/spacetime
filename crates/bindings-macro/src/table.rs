@@ -72,6 +72,31 @@ enum IndexType {
     BTree { columns: Vec<Ident> },
     Hash { columns: Vec<Ident> },
     Direct { column: Ident },
+    Vector(VectorIndexArgs),
+}
+
+/// The parsed arguments of a `vector(...)` index.
+struct VectorIndexArgs {
+    column: Ident,
+    /// The number of components every vector in the column must have.
+    ///
+    /// Mandatory: SATS cannot express a fixed-size array, so there is nothing to infer it
+    /// from, and an index with no dimension has no meaning.
+    dimension: syn::LitInt,
+    /// Defaults to `l2`.
+    metric: Option<Ident>,
+    /// Defaults to exact search.
+    strategy: Option<VectorStrategyArgs>,
+}
+
+/// The parsed `strategy = ...` of a `vector(...)` index.
+enum VectorStrategyArgs {
+    Exact,
+    Hnsw {
+        m: Option<syn::LitInt>,
+        ef_construction: Option<syn::LitInt>,
+        ef_search: Option<syn::LitInt>,
+    },
 }
 
 impl TableArgs {
@@ -260,6 +285,10 @@ impl IndexArg {
                     check_duplicate_msg(&algo, &meta, "index algorithm specified twice")?;
                     algo = Some(Self::parse_direct(meta)?);
                 }
+                sym::vector => {
+                    check_duplicate_msg(&algo, &meta, "index algorithm specified twice")?;
+                    algo = Some(Self::parse_vector(meta)?);
+                }
                 sym::name => {
                     // If the user is trying to specify a `name`, do a bit of guessing at what their goal is.
                     // This is going to be best-effort, and we're not going to try to do lookahead or anything.
@@ -305,7 +334,8 @@ Did you mean to specify an `accessor` instead? Do so with `accessor = my_index`,
         let kind = algo.ok_or_else(|| {
             meta.error(
                 "missing index algorithm, e.g., `btree(columns = [col1, col2])`, \
-                `hash(columns = [col1, col2])`, or `direct(column = col1)`",
+                `hash(columns = [col1, col2])`, `direct(column = col1)`, \
+                or `vector(column = embedding, dimension = 768)`",
             )
         })?;
 
@@ -366,6 +396,93 @@ Did you mean to specify an `accessor` instead? Do so with `accessor = my_index`,
         Ok(IndexType::Direct { column })
     }
 
+    /// Parses `vector(column = c, dimension = N, metric = m, strategy = s)`.
+    ///
+    /// Unlike `direct(column = [c])`, the column is written unbracketed: a vector index
+    /// takes exactly one column and never a list, so brackets would only mislead.
+    fn parse_vector(meta: ParseNestedMeta) -> syn::Result<IndexType> {
+        let mut column = None;
+        let mut dimension = None;
+        let mut metric = None;
+        let mut strategy = None;
+
+        meta.parse_nested_meta(|meta| {
+            match_meta!(match meta {
+                sym::column => {
+                    check_duplicate(&column, &meta)?;
+                    column = Some(meta.value()?.parse::<Ident>()?);
+                }
+                sym::dimension => {
+                    check_duplicate(&dimension, &meta)?;
+                    dimension = Some(meta.value()?.parse::<syn::LitInt>()?);
+                }
+                sym::metric => {
+                    check_duplicate(&metric, &meta)?;
+                    metric = Some(meta.value()?.parse::<Ident>()?);
+                }
+                // The search strategy is a nested keyword rather than `strategy = ...`,
+                // mirroring how the index algorithm itself is written: `hnsw(m = 24)`.
+                sym::exact => {
+                    check_duplicate_msg(&strategy, &meta, "search strategy specified twice")?;
+                    strategy = Some(VectorStrategyArgs::Exact);
+                }
+                sym::hnsw => {
+                    check_duplicate_msg(&strategy, &meta, "search strategy specified twice")?;
+                    strategy = Some(Self::parse_hnsw(&meta)?);
+                }
+            });
+            Ok(())
+        })?;
+
+        let column = column.ok_or_else(|| {
+            meta.error("must specify the column for a vector index, e.g. `vector(column = embedding, dimension = 768)`")
+        })?;
+        let dimension = dimension.ok_or_else(|| {
+            meta.error(
+                "must specify the dimension of a vector index, e.g. \
+                 `vector(column = embedding, dimension = 768)`.\n\n\
+                 A `Vec<f32>` column cannot express its own length, so the index needs to be told.",
+            )
+        })?;
+
+        Ok(IndexType::Vector(VectorIndexArgs {
+            column,
+            dimension,
+            metric,
+            strategy,
+        }))
+    }
+
+    /// Parses `hnsw` or `hnsw(m = .., ef_construction = .., ef_search = ..)`.
+    fn parse_hnsw(meta: &ParseNestedMeta) -> syn::Result<VectorStrategyArgs> {
+        let (mut m, mut ef_construction, mut ef_search) = (None, None, None);
+        // Bare `hnsw` is allowed: all three knobs have defaults.
+        if meta.input.peek(syn::token::Paren) {
+            meta.parse_nested_meta(|meta| {
+                match_meta!(match meta {
+                    sym::m => {
+                        check_duplicate(&m, &meta)?;
+                        m = Some(meta.value()?.parse::<syn::LitInt>()?);
+                    }
+                    sym::ef_construction => {
+                        check_duplicate(&ef_construction, &meta)?;
+                        ef_construction = Some(meta.value()?.parse::<syn::LitInt>()?);
+                    }
+                    sym::ef_search => {
+                        check_duplicate(&ef_search, &meta)?;
+                        ef_search = Some(meta.value()?.parse::<syn::LitInt>()?);
+                    }
+                });
+                Ok(())
+            })?;
+        }
+        Ok(VectorStrategyArgs::Hnsw {
+            m,
+            ef_construction,
+            ef_search,
+        })
+    }
+
     /// Parses an inline `#[index(btree)]`, `#[index(hash)]`, or `#[index(direct)]` attribute on a field.
     fn parse_index_attr(field: &Ident, attr: &syn::Attribute) -> syn::Result<Self> {
         let mut kind = None;
@@ -421,6 +538,40 @@ Did you mean to specify an `accessor` instead? Do so with `accessor = my_index`,
 
                 (ValidatedIndexType::Direct { col }, "direct")
             }
+            IndexType::Vector(args) => {
+                let col = find_column(&args.column)?;
+
+                if self.is_unique {
+                    return Err(syn::Error::new(
+                        args.column.span(),
+                        "a vector index cannot be unique: it ranks whole vectors by distance \
+                         and has no key lookup with which to detect a duplicate",
+                    ));
+                }
+
+                let dimension = args.dimension.base10_parse::<u32>()?;
+                if dimension == 0 {
+                    return Err(syn::Error::new(
+                        args.dimension.span(),
+                        "a vector index needs a positive dimension",
+                    ));
+                }
+
+                let metric = match &args.metric {
+                    None => VectorMetricArg::L2,
+                    Some(ident) => VectorMetricArg::parse(ident)?,
+                };
+
+                (
+                    ValidatedIndexType::Vector {
+                        col,
+                        dimension,
+                        metric,
+                        strategy: args.strategy.as_ref(),
+                    },
+                    "vector",
+                )
+            }
         };
         let gen_index_name = || {
             // See crates/schema/src/validate/v9.rs for the format of index names.
@@ -471,6 +622,13 @@ impl AccessorType {
         }
     }
 
+    fn vector(&self) -> proc_macro2::TokenStream {
+        match self {
+            AccessorType::Read => quote!(spacetimedb::VectorIndexReadOnly),
+            AccessorType::ReadWrite => quote!(spacetimedb::VectorIndex),
+        }
+    }
+
     fn unique_doc_typename(&self) -> &'static str {
         match self {
             AccessorType::Read => "UniqueColumnReadOnly",
@@ -491,6 +649,13 @@ impl AccessorType {
             AccessorType::ReadWrite => "PointIndex",
         }
     }
+
+    fn vector_doc_typename(&self) -> &'static str {
+        match self {
+            AccessorType::Read => "VectorIndexReadOnly",
+            AccessorType::ReadWrite => "VectorIndex",
+        }
+    }
 }
 
 struct ValidatedIndex<'a> {
@@ -502,16 +667,61 @@ struct ValidatedIndex<'a> {
 }
 
 enum ValidatedIndexType<'a> {
-    BTree { cols: Vec<&'a Column<'a>> },
-    Hash { cols: Vec<&'a Column<'a>> },
-    Direct { col: &'a Column<'a> },
+    BTree {
+        cols: Vec<&'a Column<'a>>,
+    },
+    Hash {
+        cols: Vec<&'a Column<'a>>,
+    },
+    Direct {
+        col: &'a Column<'a>,
+    },
+    Vector {
+        col: &'a Column<'a>,
+        dimension: u32,
+        metric: VectorMetricArg,
+        strategy: Option<&'a VectorStrategyArgs>,
+    },
+}
+
+/// The distance metric of a vector index, as written in the attribute.
+#[derive(Clone, Copy)]
+enum VectorMetricArg {
+    L2,
+    Cosine,
+    DotProduct,
+    L1,
+}
+
+impl VectorMetricArg {
+    fn parse(ident: &Ident) -> syn::Result<Self> {
+        match &*ident.to_string() {
+            "l2" | "euclidean" => Ok(Self::L2),
+            "cosine" => Ok(Self::Cosine),
+            "dot_product" | "inner_product" | "ip" => Ok(Self::DotProduct),
+            "l1" | "manhattan" => Ok(Self::L1),
+            other => Err(syn::Error::new(
+                ident.span(),
+                format!("unknown distance metric `{other}`; expected `l2`, `cosine`, `dot_product`, or `l1`"),
+            )),
+        }
+    }
+
+    fn to_tokens(self) -> TokenStream {
+        match self {
+            Self::L2 => quote!(spacetimedb::VectorMetric::L2),
+            Self::Cosine => quote!(spacetimedb::VectorMetric::Cosine),
+            Self::DotProduct => quote!(spacetimedb::VectorMetric::DotProduct),
+            Self::L1 => quote!(spacetimedb::VectorMetric::L1),
+        }
+    }
 }
 
 impl ValidatedIndexType<'_> {
     fn columns(&self) -> &[&Column<'_>] {
         match self {
             Self::BTree { cols } | Self::Hash { cols } => cols,
-            Self::Direct { col } => slice::from_ref(col),
+            Self::Direct { col } | Self::Vector { col, .. } => slice::from_ref(col),
         }
     }
 
@@ -520,6 +730,14 @@ impl ValidatedIndexType<'_> {
             [col] => Some(col),
             _ => None,
         }
+    }
+
+    /// Whether this index can serve a key lookup.
+    ///
+    /// A vector index cannot: it has no keys. This keeps it out of the query builder's
+    /// `IxCols`, where it would otherwise advertise a filterable column that is not.
+    fn is_keyed(&self) -> bool {
+        !matches!(self, Self::Vector { .. })
     }
 }
 
@@ -543,6 +761,41 @@ impl ValidatedIndex<'_> {
                 quote!(spacetimedb::table::IndexAlgo::Direct {
                     column: #col_id
                 })
+            }
+            ValidatedIndexType::Vector {
+                col,
+                dimension,
+                metric,
+                strategy,
+            } => {
+                let col_id = col.index;
+                let metric = metric.to_tokens();
+                let strategy = match strategy {
+                    None | Some(VectorStrategyArgs::Exact) => quote!(spacetimedb::VectorStrategy::Exact),
+                    Some(VectorStrategyArgs::Hnsw {
+                        m,
+                        ef_construction,
+                        ef_search,
+                    }) => {
+                        // These defaults match `spacetimedb_vector::HnswParams::default`.
+                        let m = m.as_ref().map_or_else(|| quote!(16u16), |lit| quote!(#lit));
+                        let ef_construction = ef_construction
+                            .as_ref()
+                            .map_or_else(|| quote!(200u16), |lit| quote!(#lit));
+                        let ef_search = ef_search.as_ref().map_or_else(|| quote!(64u16), |lit| quote!(#lit));
+                        quote!(spacetimedb::VectorStrategy::Hnsw {
+                            m: #m,
+                            ef_construction: #ef_construction,
+                            ef_search: #ef_search,
+                        })
+                    }
+                };
+                quote!(spacetimedb::table::IndexAlgo::Vector(spacetimedb::table::VectorIndexDesc {
+                    column: #col_id,
+                    dimension: #dimension,
+                    metric: #metric,
+                    strategy: #strategy,
+                }))
             }
         };
         let source_name = self.index_name.clone();
@@ -605,11 +858,33 @@ impl ValidatedIndex<'_> {
         let cols = self.kind.columns();
         let col_tys = cols.iter().map(|c| c.ty);
 
+        // A vector index takes no key type: it is parameterized only by the table and the
+        // index marker, since there is no key to name.
+        if let ValidatedIndexType::Vector { col, dimension, .. } = &self.kind {
+            let handle_ty = flavor.vector();
+            let doc_type = flavor.vector_doc_typename();
+            let tbl_token = quote!(#tbl_type_ident);
+            let doc = format!(
+                "Gets the `{index_ident}` [`{doc_type}`][spacetimedb::{doc_type}] as defined on this table.\n\n\
+                 This vector index is defined on [`{col_ident}`][{row_type_ident}#structfield.{col_ident}], \
+                 whose embeddings have {dimension} dimensions. Use \
+                 [`.search(query, k)`][spacetimedb::{doc_type}::search] to find the `k` nearest rows.",
+                col_ident = col.ident,
+            );
+            return quote! {
+                #[doc = #doc]
+                #vis fn #index_ident(&self) -> #handle_ty<#tbl_token, __indices::#index_ident> {
+                    #handle_ty::__NEW
+                }
+            };
+        }
+
         let (handle_ty, doc_type, kind_doc) = match &self.kind {
             ValidatedIndexType::BTree { .. } => (flavor.range(), flavor.range_doc_typename(), "B-tree"),
             // Should be unreachable, but we might as well include this.
             ValidatedIndexType::Direct { .. } => (flavor.range(), flavor.range_doc_typename(), "Direct"),
             ValidatedIndexType::Hash { .. } => (flavor.point(), flavor.point_doc_typename(), "Hash"),
+            ValidatedIndexType::Vector { .. } => unreachable!("handled above"),
         };
         let mut doc = format!(
             "Gets the `{index_ident}` [`{doc_type}`][spacetimedb::{doc_type}] as defined \
@@ -644,8 +919,8 @@ impl ValidatedIndex<'_> {
         let index_ident = self.accessor_name;
         let index_name = &self.index_name;
 
-        let (typeck_direct_index, is_ranged) = match &self.kind {
-            ValidatedIndexType::BTree { .. } => (None, true),
+        let (column_typeck, index_kind_trait) = match &self.kind {
+            ValidatedIndexType::BTree { .. } => (None, quote!(IndexIsRanged)),
             ValidatedIndexType::Direct { col } => {
                 let col_ty = col.ty;
                 let typeck = quote_spanned!(col_ty.span()=>
@@ -653,9 +928,18 @@ impl ValidatedIndex<'_> {
                         spacetimedb::spacetimedb_lib::assert_column_type_valid_for_direct_index::<#col_ty>();
                     };
                 );
-                (Some(typeck), true)
+                (Some(typeck), quote!(IndexIsRanged))
             }
-            ValidatedIndexType::Hash { .. } => (None, false),
+            ValidatedIndexType::Hash { .. } => (None, quote!(IndexIsPointed)),
+            ValidatedIndexType::Vector { col, .. } => {
+                let col_ty = col.ty;
+                let typeck = quote_spanned!(col_ty.span()=>
+                    const _: () = {
+                        spacetimedb::spacetimedb_lib::assert_column_type_valid_for_vector_index::<#col_ty>();
+                    };
+                );
+                (Some(typeck), quote!(IndexIsVector))
+            }
         };
         let vis = if self.is_unique {
             self.kind.one_col().unwrap().vis
@@ -666,13 +950,8 @@ impl ValidatedIndex<'_> {
 
         let cols = self.kind.columns();
         let num_cols = cols.len();
-        let index_kind_trait = if is_ranged {
-            quote!(IndexIsRanged)
-        } else {
-            quote!(IndexIsPointed)
-        };
         let mut decl = quote! {
-            #typeck_direct_index
+            #column_typeck
 
             #vis struct #index_ident;
             impl spacetimedb::table::#index_kind_trait for #index_ident {}
@@ -943,6 +1222,9 @@ pub(crate) fn table_impl(mut args: TableArgs, item: &syn::DeriveInput) -> syn::R
                     &**columns == slice::from_ref(unique_col.ident)
                 }
                 IndexType::Direct { column } => column == unique_col.ident,
+                // A vector index cannot enforce uniqueness, so it never counts as covering
+                // a unique constraint; an unpaired column still gets its own btree index.
+                IndexType::Vector(_) => false,
             };
             index.is_unique |= covered_by_index;
             covered_by_index
@@ -1220,9 +1502,11 @@ pub(crate) fn table_impl(mut args: TableArgs, item: &syn::DeriveInput) -> syn::R
         }
     });
 
+    // Vector indexes are skipped: `IxCol` advertises a column the query builder can filter
+    // on, and a vector index offers no such thing.
     let ix_cols_struct_fields = indices.iter().filter_map(|index| {
         let ident = index.accessor_name.clone();
-        let ty = index.kind.one_col()?.ty;
+        let ty = index.kind.is_keyed().then(|| index.kind.one_col())??.ty;
 
         Some(quote! {
             pub #ident: spacetimedb::query_builder::IxCol<#original_struct_ident, #ty>,
@@ -1238,7 +1522,7 @@ pub(crate) fn table_impl(mut args: TableArgs, item: &syn::DeriveInput) -> syn::R
     });
 
     let ix_cols_init = indices.iter().map(|index| {
-        if index.kind.one_col().is_none() {
+        if !index.kind.is_keyed() || index.kind.one_col().is_none() {
             quote! {}
         } else {
             let ident = index.accessor_name;

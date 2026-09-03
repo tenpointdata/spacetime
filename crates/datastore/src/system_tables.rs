@@ -30,7 +30,6 @@ use spacetimedb_sats::raw_identifier::{RawIdentifier, RawNamespacedIdentifier};
 use spacetimedb_sats::{impl_deserialize, impl_serialize, impl_st, u256, AlgebraicType, AlgebraicValue, ArrayValue};
 use spacetimedb_schema::def::{
     BTreeAlgorithm, ConstraintData, DirectAlgorithm, HashAlgorithm, IndexAlgorithm, ModuleDef, UniqueConstraintData,
-    VectorAlgorithm, VectorStrategy,
 };
 use spacetimedb_schema::identifier::{Identifier, NamespacedIdentifier};
 use spacetimedb_schema::schema::{
@@ -2020,6 +2019,7 @@ fn to_product_value<T: Serialize>(value: &T) -> ProductValue {
 mod tests {
     use super::*;
     use spacetimedb_data_structures::map::HashSet;
+    use spacetimedb_schema::def::{VectorAlgorithm, VectorStrategy};
     use spacetimedb_vector::{DistanceMetric, HnswParams};
 
     #[test]
@@ -2233,7 +2233,11 @@ mod tests {
         let AlgebraicTypeLayout::Sum(algorithm) = &layout.elements[StIndexFields::IndexAlgorithm.col_idx()].ty else {
             panic!("`st_index.index_algorithm` should be a sum type");
         };
-        assert_eq!(algorithm.size(), 32, "1-byte tag padded to the 16-byte alignment, plus 16 payload bytes");
+        assert_eq!(
+            algorithm.size(),
+            32,
+            "1-byte tag padded to the 16-byte alignment, plus 16 payload bytes"
+        );
         for variant in &algorithm.variants {
             assert!(
                 variant.ty.size() <= 16,

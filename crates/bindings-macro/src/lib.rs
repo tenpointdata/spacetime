@@ -136,8 +136,16 @@ mod sym {
     symbol!(column);
     symbol!(columns);
     symbol!(crate_, crate);
+    symbol!(dimension);
     symbol!(direct);
+    symbol!(ef_construction);
+    symbol!(exact);
+    symbol!(ef_search);
     symbol!(hash);
+    symbol!(hnsw);
+    symbol!(m);
+    symbol!(metric);
+    symbol!(vector);
     symbol!(index);
     symbol!(init);
     symbol!(name);

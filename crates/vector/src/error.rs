@@ -41,7 +41,10 @@ impl fmt::Display for VectorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DimensionMismatch { expected, actual } => {
-                write!(f, "expected a vector of dimension {expected}, but got one of dimension {actual}")
+                write!(
+                    f,
+                    "expected a vector of dimension {expected}, but got one of dimension {actual}"
+                )
             }
             Self::InvalidDimension { dimension } => {
                 write!(
@@ -50,7 +53,10 @@ impl fmt::Display for VectorError {
                 )
             }
             Self::NonFinite { position } => {
-                write!(f, "vector component at position {position} is not finite (NaN or infinity)")
+                write!(
+                    f,
+                    "vector component at position {position} is not finite (NaN or infinity)"
+                )
             }
         }
     }
@@ -87,7 +93,10 @@ mod tests {
 
     #[test]
     fn dimension_bounds() {
-        assert_eq!(validate_dimension(0), Err(VectorError::InvalidDimension { dimension: 0 }));
+        assert_eq!(
+            validate_dimension(0),
+            Err(VectorError::InvalidDimension { dimension: 0 })
+        );
         assert_eq!(validate_dimension(1), Ok(()));
         assert_eq!(validate_dimension(MAX_DIMENSION), Ok(()));
         assert_eq!(

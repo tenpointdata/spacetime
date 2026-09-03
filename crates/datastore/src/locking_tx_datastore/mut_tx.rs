@@ -75,7 +75,7 @@ use spacetimedb_table::{
         BlobNumBytes, DuplicateError, IndexScanPointIter, IndexScanRangeIter, InsertError, RowRef, Table,
         TableAndIndex, UniqueConstraintViolation,
     },
-    table_index::{IndexCannotSeekRange, IndexKey, IndexSeekRangeResult, PointOrRange, TableIndex},
+    table_index::{IndexCannotSeekRange, IndexKey, IndexSeekRangeResult, PointOrRange, TableIndex, VectorSearchError},
 };
 use std::{
     marker::PhantomData,
@@ -1922,6 +1922,12 @@ impl MutTxId {
             .get_table_and_index(index_id)
             .ok_or_else(|| IndexError::NotFound(index_id))?;
 
+        // A vector index has no keys, so decoding one would panic. Callers reach here with
+        // an index id straight from a module, so reject it rather than trusting them.
+        if commit_index.index().is_vector() {
+            return Err(IndexError::IndexIsVector(index_id).into());
+        }
+
         // Decode the key.
         let point = commit_index.index().key_from_bsatn(point).map_err(IndexError::Decode)?;
 
@@ -1945,6 +1951,82 @@ impl MutTxId {
         // Combine it all.
         let dt = tx_state.get_delete_table(table_id);
         ScanMutTx::combine(dt, tx_iter, commit_iter)
+    }
+
+    /// Returns the rows nearest to `query` under the vector index `index_id`, nearest
+    /// first, at most `k` of them.
+    ///
+    /// # Why this cannot reuse the scan machinery
+    ///
+    /// Every other index read fuses the transaction and committed states by chaining two
+    /// iterators and then filtering out rows this transaction has deleted
+    /// ([`ScanMutTx::combine`]). A top-`k` search cannot be assembled that way. Deleting a
+    /// committed row does not touch the committed index — it only sets a bit in the delete
+    /// table — so filtering *after* taking the nearest `k` would return fewer than `k`
+    /// rows, silently hiding neighbours that should have been promoted.
+    ///
+    /// So the tombstone check is pushed *into* the committed search, each state is asked
+    /// for its own `k` nearest, and the two distance-ordered lists are merged. That is
+    /// correct because the true `k` nearest of the union are among the `k` nearest of each
+    /// part.
+    pub fn index_scan_vector(&self, index_id: IndexId, query: &[f32], k: usize) -> Result<(TableId, Vec<RowRef<'_>>)> {
+        let (table_id, commit_index, tx_index) = self
+            .get_table_and_index(index_id)
+            .ok_or_else(|| IndexError::NotFound(index_id))?;
+
+        if !commit_index.index().is_vector() {
+            return Err(IndexError::IndexIsNotVector(index_id).into());
+        }
+
+        let to_index_error = |e| IndexError::BadVectorQuery(index_id, e);
+
+        // Rows this transaction has deleted are still physically present in the committed
+        // index, so they must be excluded as candidates rather than after the fact.
+        let deletes = self.tx_state.get_delete_table(table_id);
+        let committed = commit_index
+            .index()
+            .search_knn(query, k, |ptr| !deletes.is_some_and(|d| d.contains(*ptr)))
+            .map_err(|e| match e {
+                VectorSearchError::BadQuery(e) => to_index_error(e),
+                VectorSearchError::NotAVectorIndex => IndexError::IndexIsNotVector(index_id),
+            })?;
+
+        // Rows inserted by this transaction live in its own copy of the index.
+        let uncommitted = match tx_index {
+            Some(tx_index) => tx_index.index().search_knn(query, k, |_| true).map_err(|e| match e {
+                VectorSearchError::BadQuery(e) => to_index_error(e),
+                VectorSearchError::NotAVectorIndex => IndexError::IndexIsNotVector(index_id),
+            })?,
+            None => Vec::new(),
+        };
+
+        // Merge the two distance-ordered lists. Ties break on the row pointer, matching
+        // how each list was ordered internally, so the merged order is deterministic.
+        let mut merged = Vec::with_capacity(committed.len() + uncommitted.len());
+        merged.extend(committed.into_iter().map(|n| (n, false)));
+        merged.extend(uncommitted.into_iter().map(|n| (n, true)));
+        merged.sort_by(|(a, _), (b, _)| {
+            a.distance
+                .total_cmp(&b.distance)
+                .then_with(|| a.payload.cmp(&b.payload))
+        });
+        merged.truncate(k);
+
+        let rows = merged
+            .into_iter()
+            .map(|(neighbor, from_tx)| {
+                let source = if from_tx {
+                    tx_index.expect("a tx result can only come from a tx index")
+                } else {
+                    commit_index
+                };
+                // SAFETY: `neighbor.payload` came out of `source`'s index, and an index
+                // only ever holds pointers to rows present in its own table.
+                unsafe { source.combine_with_ptr(neighbor.payload) }
+            })
+            .collect();
+
+        Ok((table_id, rows))
     }
 
     /// Returns an iterator yielding rows by performing a range index scan

@@ -173,6 +173,7 @@ pub enum AbiCall {
     DatastoreTableRowCount,
     DatastoreTableScanBsatn,
     DatastoreIndexScanPointBsatn,
+    DatastoreIndexScanVectorBsatn,
     DatastoreIndexScanRangeBsatn,
     RowIterBsatnAdvance,
     RowIterBsatnClose,

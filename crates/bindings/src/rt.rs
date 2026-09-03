@@ -1,14 +1,17 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use crate::query_builder::{FromWhere, HasCols, LeftSemiJoin, RawQuery, RightSemiJoin, Table as QbTable};
-use crate::table::IndexAlgo;
+use crate::table::{IndexAlgo, VectorMetric, VectorStrategy};
 use crate::{sys, AnonymousViewContext, IterBuf, ReducerContext, ReducerResult, SpacetimeType, Table, ViewContext};
 use spacetimedb_lib::bsatn::EncodeError;
 use spacetimedb_lib::db::raw_def::v10::{
     CaseConversionPolicy, ExplicitNames as RawExplicitNames, RawModuleDefV10Builder,
 };
 pub use spacetimedb_lib::db::raw_def::v9::Lifecycle as LifecycleReducer;
-use spacetimedb_lib::db::raw_def::v9::{RawIndexAlgorithm, TableType, ViewResultHeader};
+use spacetimedb_lib::db::raw_def::v9::{
+    RawHnswParamsV9, RawIndexAlgorithm, RawVectorIndexV9, RawVectorMetric, RawVectorStrategy, TableType,
+    ViewResultHeader,
+};
 use spacetimedb_lib::de::{self, Deserialize, DeserializeOwned, Error as _, SeqProductAccess};
 use spacetimedb_lib::sats::typespace::TypespaceBuilder;
 use spacetimedb_lib::sats::{impl_deserialize, impl_serialize, ProductTypeElement};
@@ -791,6 +794,28 @@ impl From<IndexAlgo<'_>> for RawIndexAlgorithm {
                 columns: columns.iter().copied().collect(),
             },
             IndexAlgo::Direct { column } => RawIndexAlgorithm::Direct { column: column.into() },
+            IndexAlgo::Vector(desc) => RawIndexAlgorithm::Vector(RawVectorIndexV9 {
+                column: desc.column.into(),
+                dimension: desc.dimension,
+                metric: match desc.metric {
+                    VectorMetric::L2 => RawVectorMetric::L2,
+                    VectorMetric::Cosine => RawVectorMetric::Cosine,
+                    VectorMetric::DotProduct => RawVectorMetric::DotProduct,
+                    VectorMetric::L1 => RawVectorMetric::L1,
+                },
+                strategy: match desc.strategy {
+                    VectorStrategy::Exact => RawVectorStrategy::Exact,
+                    VectorStrategy::Hnsw {
+                        m,
+                        ef_construction,
+                        ef_search,
+                    } => RawVectorStrategy::Hnsw(RawHnswParamsV9 {
+                        m,
+                        ef_construction,
+                        ef_search,
+                    }),
+                },
+            }),
         }
     }
 }

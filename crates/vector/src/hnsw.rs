@@ -365,10 +365,8 @@ impl<P: Copy + Eq + Hash + Ord> HnswIndex<P> {
         let mut top = TopK::new(k);
         for cand in found {
             // Tombstoned nodes navigate but never surface.
-            if let Some(payload) = self.store.payload(cand.slot) {
-                if keep(&payload) {
-                    top.offer(cand.rank, payload);
-                }
+            if let Some(payload) = self.store.payload(cand.slot).filter(&keep) {
+                top.offer(cand.rank, payload);
             }
         }
         Ok(top.into_sorted_vec(|rank| self.metric.finalize(rank)))
@@ -411,7 +409,7 @@ impl<P: Copy + Eq + Hash + Ord> HnswIndex<P> {
 
         let m = self.params.m as u64;
         let mut level = 0;
-        while level < MAX_LEVEL && h % m == 0 {
+        while level < MAX_LEVEL && h.is_multiple_of(m) {
             level += 1;
             h = splitmix64(h);
         }
@@ -800,7 +798,10 @@ mod tests {
         // With m = 16 the promotion probability is 1/16, so ~93.75% stay on layer 0.
         let ratio = level0 as f64 / vectors.len() as f64;
         assert!((0.92..0.96).contains(&ratio), "ratio was {ratio}");
-        assert!(vectors.iter().any(|v| idx.level_for(v) >= 2), "no vector was promoted twice");
+        assert!(
+            vectors.iter().any(|v| idx.level_for(v) >= 2),
+            "no vector was promoted twice"
+        );
     }
 
     #[test]

@@ -38,11 +38,11 @@ use spacetimedb_lib::db::raw_def::v10::{
     RawSequenceDefV10, RawSubmoduleV10, RawTableDefV10, RawTypeDefV10, RawViewDefV10, RawViewPrimaryKeyDefV10,
 };
 use spacetimedb_lib::db::raw_def::v9::{
-    Lifecycle, RawColumnDefaultValueV9, RawConstraintDataV9, RawConstraintDefV9, RawIndexAlgorithm, RawIndexDefV9,
-    RawMiscModuleExportV9, RawModuleDefV9, RawProcedureDefV9, RawReducerDefV9, RawRowLevelSecurityDefV9,
+    Lifecycle, RawColumnDefaultValueV9, RawConstraintDataV9, RawConstraintDefV9, RawHnswParamsV9, RawIndexAlgorithm,
+    RawIndexDefV9, RawMiscModuleExportV9, RawModuleDefV9, RawProcedureDefV9, RawReducerDefV9, RawRowLevelSecurityDefV9,
     RawScheduleDefV9, RawScopedTypeNameV9, RawSequenceDefV9, RawSql, RawTableDefV9, RawTypeDefV9,
-    RawHnswParamsV9, RawUniqueConstraintDataV9, RawVectorIndexV9, RawVectorMetric, RawVectorStrategy,
-    RawViewDefV9, TableAccess, TableType,
+    RawUniqueConstraintDataV9, RawVectorIndexV9, RawVectorMetric, RawVectorStrategy, RawViewDefV9, TableAccess,
+    TableType,
 };
 use spacetimedb_lib::db::view::{extract_view_return_product_type_ref, ViewKind};
 use spacetimedb_lib::{ProductType, RawModuleDef};

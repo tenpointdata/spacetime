@@ -10,3 +10,13 @@ impl DirectIndexKey for u64 {}
 
 /// Assert that `T` is a valid column to use direct index on.
 pub const fn assert_column_type_valid_for_direct_index<T: DirectIndexKey>() {}
+
+#[diagnostic::on_unimplemented(
+    message = "a vector index requires a column of type `Vec<f32>`",
+    label = "should be `Vec<f32>`, not `{Self}`"
+)]
+pub trait VectorIndexKey {}
+impl VectorIndexKey for Vec<f32> {}
+
+/// Assert that `T` is a valid column to build a vector index on.
+pub const fn assert_column_type_valid_for_vector_index<T: VectorIndexKey>() {}

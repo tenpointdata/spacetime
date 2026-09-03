@@ -278,9 +278,13 @@ impl ModuleValidatorV9<'_> {
                     // If we wanted to, we could make the constraints merely use indices,
                     // rather than be indices.
                     .filter(|(_, unique_cols)| {
-                        !indexes
-                            .values()
-                            .any(|i| ColSet::from(i.algorithm.columns()) == **unique_cols)
+                        !indexes.values().any(|i| {
+                            // A vector index cannot back a unique constraint: it ranks
+                            // whole vectors by distance and has no key lookup with which
+                            // to detect a duplicate.
+                            !matches!(i.algorithm, IndexAlgorithm::Vector(_))
+                                && ColSet::from(i.algorithm.columns()) == **unique_cols
+                        })
                     })
                     .map(|(c, cols)| {
                         let constraint = c.name.clone();
@@ -1312,9 +1316,7 @@ impl<'a, 'b> TableValidator<'a, 'b> {
                 // Embeddings are `Vec<f32>`. Nothing else can be measured for similarity,
                 // and `Vec<f64>` is deliberately excluded: no embedding model emits `f64`,
                 // and supporting it would double every index's memory for no benefit.
-                let is_f32_array = ty
-                    .as_array()
-                    .is_some_and(|array| *array.elem_ty == AlgebraicType::F32);
+                let is_f32_array = ty.as_array().is_some_and(|array| *array.elem_ty == AlgebraicType::F32);
                 if !is_f32_array {
                     return Err(ValidationError::VectorIndexOnBadType {
                         index: name.clone(),

@@ -702,6 +702,54 @@ impl WasmInstanceEnv {
         })
     }
 
+    /// Finds the `k` rows nearest to the query vector `query_ptr[..query_len]`,
+    /// using the vector index identified by `index_id`.
+    ///
+    /// The query is a BSATN-encoded `Vec<f32>` whose length must equal the index's
+    /// declared dimension. Rows are returned nearest first, through an iterator whose id
+    /// is written to `out`.
+    ///
+    /// # Traps
+    ///
+    /// Traps if:
+    /// - `query_ptr` is NULL or `query_ptr[..query_len]` is not in bounds of WASM memory.
+    /// - `out` is NULL or `out[..size_of::<RowIter>()]` is not in bounds of WASM memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error:
+    ///
+    /// - `NOT_IN_TRANSACTION`, when called outside of a transaction.
+    /// - `NO_SUCH_INDEX`, when `index_id` is not a known ID of an index.
+    /// - `WRONG_INDEX_ALGO`, when the index is not a vector index.
+    /// - `BSATN_DECODE_ERROR`, when `query` is not a well-formed vector of the index's
+    ///   dimension with finite components.
+    pub fn datastore_index_scan_vector_bsatn(
+        caller: Caller<'_, Self>,
+        index_id: u32,
+        query_ptr: WasmPtr<u8>, // Vec<f32>
+        query_len: u32,
+        k: u32,
+        out: WasmPtr<RowIterIdx>,
+    ) -> RtResult<u32> {
+        Self::cvt_ret(caller, AbiCall::DatastoreIndexScanVectorBsatn, out, |caller| {
+            let (mem, env) = Self::mem_env(caller);
+            // Read the query vector from WASM memory.
+            let query = mem.deref_slice(query_ptr, query_len)?;
+
+            // Find the nearest rows.
+            let chunks = env.instance_env.datastore_index_scan_vector_bsatn_chunks(
+                &mut env.chunk_pool,
+                index_id.into(),
+                query,
+                k,
+            )?;
+
+            // Insert the encoded + concatenated rows into a new buffer and return its id.
+            Ok(env.iters.insert(chunks.into_iter()))
+        })
+    }
+
     /// Finds all rows in the index identified by `index_id`,
     /// according to the:
     /// - `prefix = prefix_ptr[..prefix_len]`,

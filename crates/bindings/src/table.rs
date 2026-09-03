@@ -162,6 +162,55 @@ pub enum IndexAlgo<'a> {
     BTree { columns: &'a [u16] },
     Hash { columns: &'a [u16] },
     Direct { column: u16 },
+    Vector(VectorIndexDesc),
+}
+
+/// The parameters of a vector index, as declared by the `#[table]` macro.
+#[derive(Clone, Copy)]
+pub struct VectorIndexDesc {
+    /// The indexed column, whose type must be `Vec<f32>`.
+    pub column: u16,
+    /// The number of components every vector in the column must have.
+    pub dimension: u32,
+    /// How similarity is measured.
+    pub metric: VectorMetric,
+    /// Whether searches are exhaustive or approximate.
+    pub strategy: VectorStrategy,
+}
+
+/// How a vector index measures similarity between two embeddings.
+///
+/// Every metric is a *distance*: smaller means more similar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorMetric {
+    /// Euclidean distance. The default.
+    L2,
+    /// Cosine distance, `1 - cosine similarity`. The usual choice for text embeddings,
+    /// which are compared by direction rather than magnitude.
+    Cosine,
+    /// Negated inner product, ranking by *largest* dot product.
+    DotProduct,
+    /// Manhattan distance.
+    L1,
+}
+
+/// How a vector index searches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorStrategy {
+    /// Compare the query against every indexed vector.
+    ///
+    /// Always returns the true nearest neighbours, and always returns the same answer for
+    /// the same set of rows. The default.
+    Exact,
+    /// Search an HNSW proximity graph, trading exactness for speed on large collections.
+    Hnsw {
+        /// Edges kept per node per graph layer. 16 is a good default.
+        m: u16,
+        /// Search width used while inserting. 200 is a good default.
+        ef_construction: u16,
+        /// Default search width used while querying. 64 is a good default.
+        ef_search: u16,
+    },
 }
 
 pub struct ScheduleDesc<'a> {
@@ -686,6 +735,109 @@ impl<Tbl: Table, IndexType, Idx: IndexIsPointed> PointIndexReadOnly<Tbl, IndexTy
         P: WithPointArg<K>,
     {
         filter_point::<Tbl, Idx, K>(point)
+    }
+}
+
+/// Marks an index as answering nearest-neighbour searches.
+///
+/// Vector indexes support neither point nor range scans: they rank whole vectors by
+/// distance from a query, so there is no key to look up. This is why they get their own
+/// marker rather than reusing [`IndexIsPointed`] or [`IndexIsRanged`].
+pub trait IndexIsVector: Index {}
+
+/// A handle to a vector index on a table.
+///
+/// To get one of these from a `ReducerContext`, use:
+/// ```text
+/// ctx.db.{table}().{index}()
+/// ```
+/// for a table *table* and an index *index*.
+///
+/// # Example
+///
+/// ```no_run
+/// # #[cfg(target_arch = "wasm32")] mod demo {
+/// use spacetimedb::{table, ReducerContext, VectorIndex};
+///
+/// #[table(accessor = document,
+///     index(accessor = by_embedding, vector(column = embedding, dimension = 4, metric = cosine)))]
+/// struct Document {
+///     #[primary_key]
+///     id: u64,
+///     embedding: Vec<f32>,
+///     text: String,
+/// }
+///
+/// fn demo(ctx: &ReducerContext) {
+///     let query = vec![0.1, 0.2, 0.3, 0.4];
+///
+///     // The 5 documents most similar to `query`, most similar first.
+///     for doc in ctx.db.document().by_embedding().search(&query, 5) {
+///         log::info!("{}", doc.text);
+///     }
+/// }
+/// # }
+/// ```
+pub struct VectorIndex<Tbl: Table, Idx: Index> {
+    _marker: PhantomData<(Tbl, Idx)>,
+}
+
+impl<Tbl: Table, Idx: IndexIsVector> VectorIndex<Tbl, Idx> {
+    #[doc(hidden)]
+    pub const __NEW: Self = Self { _marker: PhantomData };
+
+    /// Returns the `k` rows whose indexed vectors are nearest to `query`, nearest first.
+    ///
+    /// Fewer than `k` rows are returned if the table holds fewer. Rows inserted earlier in
+    /// this transaction are included, and rows deleted in it are not.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `query`'s length differs from the index's declared dimension, or if it
+    /// contains a `NaN` or an infinity — neither has a defined distance to anything, so
+    /// there is no sensible answer to return.
+    pub fn search(&self, query: &[f32], k: u32) -> impl Iterator<Item = Tbl::Row> + use<Tbl, Idx> {
+        search_vector::<Tbl, Idx>(query, k)
+    }
+}
+
+/// Searches `Tbl` for the `k` rows nearest to `query`, using the vector index `Idx`.
+fn search_vector<Tbl, Idx>(query: &[f32], k: u32) -> impl Iterator<Item = Tbl::Row> + use<Tbl, Idx>
+where
+    Tbl: Table,
+    Idx: IndexIsVector,
+{
+    let index_id = Idx::index_id();
+    // `Vec<f32>` is not a `FilterableValue`, and deliberately so: it is not a key. The
+    // query is BSATN-encoded directly, matching what the syscall expects.
+    let buf = IterBuf::serialize(query).expect("a slice of `f32` should always serialize");
+    let iter = sys::datastore_index_scan_vector_bsatn(index_id, &buf, k)
+        .unwrap_or_else(|e| panic!("unexpected error from `datastore_index_scan_vector_bsatn`: {e}"));
+    TableIter::new(iter)
+}
+
+/// A read-only handle to a vector index.
+///
+/// This is the read-only version of [`VectorIndex`]. Since a vector index has no delete
+/// operation, it exposes the same `search` and differs only in the handle it hangs off.
+/// It is used by `{table}__ViewHandle` to keep view code read-only at compile time.
+///
+/// Note, the `Tbl` generic is the read-write table handle `{table}__TableHandle`.
+/// This is because read-only indexes still need [`Table`] metadata.
+/// The view handle itself deliberately does not implement [`Table`].
+pub struct VectorIndexReadOnly<Tbl: Table, Idx: Index> {
+    _marker: PhantomData<(Tbl, Idx)>,
+}
+
+impl<Tbl: Table, Idx: IndexIsVector> VectorIndexReadOnly<Tbl, Idx> {
+    #[doc(hidden)]
+    pub const __NEW: Self = Self { _marker: PhantomData };
+
+    /// Returns the `k` rows whose indexed vectors are nearest to `query`, nearest first.
+    ///
+    /// See [`VectorIndex::search`].
+    pub fn search(&self, query: &[f32], k: u32) -> impl Iterator<Item = Tbl::Row> + use<Tbl, Idx> {
+        search_vector::<Tbl, Idx>(query, k)
     }
 }
 
