@@ -86,3 +86,92 @@ fn submodule_reducer_wire_name_is_qualified_once() {
         "namespace was applied twice somewhere in the generated bindings"
     );
 }
+
+/// Client codegen must not emit an accessor for a vector index.
+///
+/// Every backend reaches an index through `IndexAlgorithm::columns()` and emits a typed
+/// key lookup. A vector index has no key — it ranks whole embeddings by distance, which is
+/// answered by the host inside a transaction and has no client-side equivalent. Emitting
+/// one anyway produced C# that does not compile, because `BTreeIndexBase<T>` requires the
+/// key type to be `IEquatable` and `IComparable`, and `List<float>` is neither.
+#[test]
+fn vector_indexes_are_not_exposed_to_clients() {
+    use spacetimedb_lib::db::raw_def::v9::{
+        btree, RawIndexAlgorithm, RawModuleDefV9Builder, RawVectorIndexV9, RawVectorMetric, RawVectorStrategy,
+    };
+    use spacetimedb_lib::{AlgebraicType, ProductType};
+
+    let mut builder = RawModuleDefV9Builder::new();
+    builder
+        .build_table_with_new_type(
+            "Document",
+            ProductType::from([
+                ("id", AlgebraicType::U64),
+                ("embedding", AlgebraicType::array(AlgebraicType::F32)),
+            ]),
+            true,
+        )
+        .with_index(btree(0), "by_id")
+        .with_index(
+            RawIndexAlgorithm::Vector(RawVectorIndexV9 {
+                column: 1.into(),
+                dimension: 4,
+                metric: RawVectorMetric::Cosine,
+                strategy: RawVectorStrategy::Exact,
+            }),
+            "by_embedding",
+        )
+        .finish();
+    let module: ModuleDef = builder
+        .finish()
+        .try_into()
+        .expect("a table with a vector index should be a valid module");
+
+    let generate_all = |lang_files: Vec<spacetimedb_codegen::OutputFile>| -> String {
+        lang_files.into_iter().map(|f| f.code).collect()
+    };
+
+    // Each backend names accessors in its own convention, so the expectation differs.
+    // Rust's client codegen emits no index accessors at all today, so it has nothing to
+    // check beyond the absence of the vector one.
+    let cases: [(&str, String, Option<&str>); 3] = [
+        (
+            "csharp",
+            generate_all(generate(
+                &module,
+                &Csharp {
+                    namespace: "SpacetimeDB",
+                },
+                &CodegenOptions::default(),
+            )),
+            Some("ById"),
+        ),
+        (
+            "typescript",
+            generate_all(generate(&module, &TypeScript, &CodegenOptions::default())),
+            Some("by_id"),
+        ),
+        (
+            "rust",
+            generate_all(generate(&module, &Rust, &CodegenOptions::default())),
+            None,
+        ),
+    ];
+
+    for (lang, code, keyed_accessor) in cases {
+        for spelling in ["by_embedding", "byEmbedding", "ByEmbedding"] {
+            assert!(
+                !code.contains(spelling),
+                "{lang} codegen exposed the vector index as `{spelling}`"
+            );
+        }
+        // Also assert the keyed index on the same table still comes through, so this test
+        // fails if index generation breaks altogether rather than just skipping vector ones.
+        if let Some(accessor) = keyed_accessor {
+            assert!(
+                code.contains(accessor),
+                "{lang} codegen dropped the btree index too; expected `{accessor}`"
+            );
+        }
+    }
+}

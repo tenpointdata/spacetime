@@ -110,8 +110,14 @@ export function tableToSchema<
   // Build fully-resolved runtime index metadata from the host-facing RawTableDef.
   // This is intentionally separate from `schema.idxs`, which keeps the original
   // user-declared `IndexOpts` shape for type-level inference.
-  const resolvedIndexes: UntypedIndex<AllowedCol>[] = tableDef.indexes.map(
+  const resolvedIndexes: UntypedIndex<AllowedCol>[] = tableDef.indexes.flatMap(
     idx => {
+      // A vector index ranks whole embeddings by distance rather than looking rows up
+      // by a key, so it has no client-side accessor and is not surfaced here.
+      if (idx.algorithm.tag === 'Vector') {
+        return [];
+      }
+
       const accessorName = idx.accessorName;
       if (typeof accessorName !== 'string' || accessorName.length === 0) {
         throw new TypeError(
