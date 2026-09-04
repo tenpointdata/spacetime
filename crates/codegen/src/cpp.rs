@@ -11,6 +11,7 @@ use spacetimedb_schema::type_for_generate::{
     AlgebraicTypeDef, AlgebraicTypeUse, PlainEnumTypeDef, ProductTypeDef, SumTypeDef,
 };
 // Removed unused import
+use itertools::Itertools as _;
 use std::collections::HashSet;
 use std::fmt::{self, Write};
 
@@ -292,12 +293,16 @@ impl<'opts> Cpp<'opts> {
             writeln!(output, "}};").unwrap();
             writeln!(output).unwrap();
 
-            // Generate the tagged enum
+            // Generate the tagged enum. The order of these variants IS the BSATN tag, so
+            // it must match `RawIndexAlgorithm` in crates/lib exactly. Unlike the three
+            // above, the vector variant's payload is a generated type rather than a
+            // hand-written one, since it is a real struct in its own right.
             writeln!(output, "// RawIndexAlgorithm tagged enum with data variants").unwrap();
             writeln!(output, "SPACETIMEDB_INTERNAL_TAGGED_ENUM({}, ", type_name).unwrap();
             writeln!(output, "    SpacetimeDB::Internal::RawIndexAlgorithmBTreeData,").unwrap();
             writeln!(output, "    SpacetimeDB::Internal::RawIndexAlgorithmHashData,").unwrap();
-            writeln!(output, "    SpacetimeDB::Internal::RawIndexAlgorithmDirectData").unwrap();
+            writeln!(output, "    SpacetimeDB::Internal::RawIndexAlgorithmDirectData,").unwrap();
+            writeln!(output, "    SpacetimeDB::Internal::RawVectorIndexV9").unwrap();
             writeln!(output, ")").unwrap();
             return;
         }
@@ -490,7 +495,9 @@ impl Lang for Cpp<'_> {
 
         // Add includes for dependencies
         if let Some(AlgebraicTypeDef::Product(product)) = module.typespace_for_generate().get(table.product_type_ref) {
-            let deps = self.collect_product_dependencies(module, product);
+            // Sorted: the collectors return a `HashSet`, whose iteration order varies
+            // between runs, which would make the generated headers differ every time.
+            let deps = self.collect_product_dependencies(module, product).into_iter().sorted();
             for dep in deps {
                 if dep != table.name.to_string() {
                     writeln!(output, "#include \"{}.g.h\"", dep).unwrap();
@@ -540,7 +547,8 @@ impl Lang for Cpp<'_> {
         };
 
         let type_name = name.to_string();
-        for dep in deps {
+        // Sorted, for the reason given in `generate_table_file`.
+        for dep in deps.into_iter().sorted() {
             if dep != type_name && !(type_name == "RawSubmoduleV10" && dep == "RawModuleDefV10") {
                 writeln!(output, "#include \"{}.g.h\"", dep).unwrap();
             }

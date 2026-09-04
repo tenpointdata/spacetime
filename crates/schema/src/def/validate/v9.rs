@@ -278,9 +278,13 @@ impl ModuleValidatorV9<'_> {
                     // If we wanted to, we could make the constraints merely use indices,
                     // rather than be indices.
                     .filter(|(_, unique_cols)| {
-                        !indexes
-                            .values()
-                            .any(|i| ColSet::from(i.algorithm.columns()) == **unique_cols)
+                        !indexes.values().any(|i| {
+                            // A vector index cannot back a unique constraint: it ranks
+                            // whole vectors by distance and has no key lookup with which
+                            // to detect a duplicate.
+                            !matches!(i.algorithm, IndexAlgorithm::Vector(_))
+                                && ColSet::from(i.algorithm.columns()) == **unique_cols
+                        })
                     })
                     .map(|(c, cols)| {
                         let constraint = c.name.clone();
@@ -1299,6 +1303,47 @@ impl<'a, 'b> TableValidator<'a, 'b> {
                 Ok(DirectAlgorithm { column }.into())
             }),
 
+            RawIndexAlgorithm::Vector(raw) => self.validate_col_id(name, raw.column).and_then(|column| {
+                let field = &self.product_type.elements[column.idx()];
+                let ty = &field.algebraic_type;
+                let column_name = || {
+                    field
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| RawIdentifier::new(format!("{}", column.idx())))
+                };
+
+                // Embeddings are `Vec<f32>`. Nothing else can be measured for similarity,
+                // and `Vec<f64>` is deliberately excluded: no embedding model emits `f64`,
+                // and supporting it would double every index's memory for no benefit.
+                let is_f32_array = ty.as_array().is_some_and(|array| *array.elem_ty == AlgebraicType::F32);
+                if !is_f32_array {
+                    return Err(ValidationError::VectorIndexOnBadType {
+                        index: name.clone(),
+                        column: column_name(),
+                        ty: ty.clone().into(),
+                    }
+                    .into());
+                }
+
+                let dimension = raw.dimension;
+                if dimension == 0 || dimension as usize > spacetimedb_vector::MAX_DIMENSION {
+                    return Err(ValidationError::VectorIndexBadDimension {
+                        index: name.clone(),
+                        dimension,
+                        max: spacetimedb_vector::MAX_DIMENSION as u32,
+                    }
+                    .into());
+                }
+
+                Ok(IndexAlgorithm::Vector(VectorAlgorithm {
+                    column,
+                    dimension,
+                    metric: distance_metric_from_raw(raw.metric),
+                    strategy: vector_strategy_from_raw(raw.strategy),
+                }))
+            }),
+
             algo => unreachable!("unknown algorithm {algo:?}"),
         }
     }
@@ -1459,6 +1504,7 @@ pub fn generate_index_name(
         RawIndexAlgorithm::BTree { columns } => ("btree", columns),
         RawIndexAlgorithm::Direct { column } => ("direct", &col_list![*column]),
         RawIndexAlgorithm::Hash { columns } => ("hash", columns),
+        RawIndexAlgorithm::Vector(vector) => ("vector", &col_list![vector.column]),
         _ => unimplemented!("Unknown index algorithm {:?}", algorithm),
     };
     let column_names = concat_column_names(table_type, columns);

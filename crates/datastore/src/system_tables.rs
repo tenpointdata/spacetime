@@ -13,7 +13,9 @@
 
 use spacetimedb_data_structures::map::{HashCollectionExt as _, HashMap};
 use spacetimedb_lib::db::auth::{StAccess, StTableType};
-use spacetimedb_lib::db::raw_def::v9::{btree, RawSql};
+use spacetimedb_lib::db::raw_def::v9::{
+    btree, RawHnswParamsV9, RawSql, RawVectorIndexV9, RawVectorMetric, RawVectorStrategy,
+};
 use spacetimedb_lib::db::raw_def::*;
 use spacetimedb_lib::de::{Deserialize, DeserializeOwned, Error};
 use spacetimedb_lib::ser::Serialize;
@@ -1223,6 +1225,111 @@ pub enum StIndexAlgorithm {
 
     /// A Hash index.
     Hash { columns: ColList },
+
+    /// A vector similarity index for nearest-neighbour search over embeddings.
+    Vector { vector: StVectorIndex },
+}
+
+/// The persisted parameters of an [`StIndexAlgorithm::Vector`] index.
+///
+/// # Why this is all scalars
+///
+/// [`StIndexAlgorithm::Unused`] reserves exactly 16 bytes so that the `st_index` row
+/// layout can never grow, and every variant must fit inside that budget. The richer
+/// `RawVectorMetric` / `RawVectorStrategy` sums do not: laid out in BFLATN they need 18
+/// bytes, which would silently change the on-disk shape of `st_index` for every existing
+/// database. So metric and strategy are stored as their tags, the HNSW knobs are stored
+/// flat, and the fields are ordered widest-first so alignment padding does not push the
+/// total over. The result is exactly 16 bytes, asserted by
+/// `st_index_algorithm_layout_is_stable`.
+///
+/// Like [`StIndexAlgorithm`], existing fields must never change meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SpacetimeType)]
+#[sats(crate = spacetimedb_lib)]
+pub struct StVectorIndex {
+    /// The dimensionality every vector in the column must have.
+    pub dimension: u32,
+    /// The indexed column, whose type is `Array(F32)`.
+    pub column: ColId,
+    /// HNSW edges per node per layer; ignored when `strategy` is exact.
+    pub m: u16,
+    /// HNSW build-time search width; ignored when `strategy` is exact.
+    pub ef_construction: u16,
+    /// HNSW query-time search width; ignored when `strategy` is exact.
+    pub ef_search: u16,
+    /// The distance metric, as a [`StVectorMetric`] discriminant.
+    pub metric: u8,
+    /// The search strategy, as a [`StVectorStrategy`] discriminant.
+    pub strategy: u8,
+}
+
+/// Discriminants for [`StVectorIndex::metric`].
+///
+/// These values are written to disk: never renumber them.
+mod st_vector_metric {
+    pub const L2: u8 = 0;
+    pub const COSINE: u8 = 1;
+    pub const DOT_PRODUCT: u8 = 2;
+    pub const L1: u8 = 3;
+}
+
+/// Discriminants for [`StVectorIndex::strategy`].
+///
+/// These values are written to disk: never renumber them.
+mod st_vector_strategy {
+    pub const EXACT: u8 = 0;
+    pub const HNSW: u8 = 1;
+}
+
+impl From<RawVectorIndexV9> for StVectorIndex {
+    fn from(raw: RawVectorIndexV9) -> Self {
+        let (strategy, m, ef_construction, ef_search) = match raw.strategy {
+            RawVectorStrategy::Hnsw(p) => (st_vector_strategy::HNSW, p.m, p.ef_construction, p.ef_search),
+            // `RawVectorStrategy` is `#[non_exhaustive]`; an unknown strategy from a
+            // newer ABI degrades to exact search, which is always a correct answer.
+            _ => (st_vector_strategy::EXACT, 0, 0, 0),
+        };
+        Self {
+            dimension: raw.dimension,
+            column: raw.column,
+            m,
+            ef_construction,
+            ef_search,
+            metric: match raw.metric {
+                RawVectorMetric::Cosine => st_vector_metric::COSINE,
+                RawVectorMetric::DotProduct => st_vector_metric::DOT_PRODUCT,
+                RawVectorMetric::L1 => st_vector_metric::L1,
+                // Likewise: an unknown metric degrades to the default rather than
+                // refusing to store the index.
+                _ => st_vector_metric::L2,
+            },
+            strategy,
+        }
+    }
+}
+
+impl From<StVectorIndex> for RawVectorIndexV9 {
+    fn from(st: StVectorIndex) -> Self {
+        Self {
+            column: st.column,
+            dimension: st.dimension,
+            metric: match st.metric {
+                st_vector_metric::COSINE => RawVectorMetric::Cosine,
+                st_vector_metric::DOT_PRODUCT => RawVectorMetric::DotProduct,
+                st_vector_metric::L1 => RawVectorMetric::L1,
+                // Includes `L2` and any tag written by a future version.
+                _ => RawVectorMetric::L2,
+            },
+            strategy: match st.strategy {
+                st_vector_strategy::HNSW => RawVectorStrategy::Hnsw(RawHnswParamsV9 {
+                    m: st.m,
+                    ef_construction: st.ef_construction,
+                    ef_search: st.ef_search,
+                }),
+                _ => RawVectorStrategy::Exact,
+            },
+        }
+    }
 }
 
 impl From<IndexAlgorithm> for StIndexAlgorithm {
@@ -1231,6 +1338,11 @@ impl From<IndexAlgorithm> for StIndexAlgorithm {
             IndexAlgorithm::BTree(BTreeAlgorithm { columns }) => Self::BTree { columns },
             IndexAlgorithm::Hash(HashAlgorithm { columns }) => Self::Hash { columns },
             IndexAlgorithm::Direct(DirectAlgorithm { column }) => Self::Direct { column },
+            // Round-trip through the raw (ABI) form, which is the shared vocabulary for
+            // metric and strategy.
+            IndexAlgorithm::Vector(vector) => Self::Vector {
+                vector: RawVectorIndexV9::from(vector).into(),
+            },
             algo => unreachable!("unexpected `{algo:?}`, did you add a new one?"),
         }
     }
@@ -1242,6 +1354,7 @@ impl From<StIndexAlgorithm> for IndexAlgorithm {
             StIndexAlgorithm::BTree { columns } => BTreeAlgorithm { columns }.into(),
             StIndexAlgorithm::Hash { columns } => HashAlgorithm { columns }.into(),
             StIndexAlgorithm::Direct { column } => DirectAlgorithm { column }.into(),
+            StIndexAlgorithm::Vector { vector } => RawVectorIndexV9::from(vector).into(),
             algo => unreachable!("unexpected `{algo:?}` in system table `st_indexes`"),
         }
     }
@@ -1906,6 +2019,8 @@ fn to_product_value<T: Serialize>(value: &T) -> ProductValue {
 mod tests {
     use super::*;
     use spacetimedb_data_structures::map::HashSet;
+    use spacetimedb_schema::def::{VectorAlgorithm, VectorStrategy};
+    use spacetimedb_vector::{DistanceMetric, HnswParams};
 
     #[test]
     fn test_index_ids_are_unique() {
@@ -2060,6 +2175,23 @@ mod tests {
                 columns: col_list![2, 3],
             }),
             IndexAlgorithm::Direct(DirectAlgorithm { column: ColId(0) }),
+            IndexAlgorithm::Vector(VectorAlgorithm {
+                column: ColId(4),
+                dimension: 1536,
+                metric: DistanceMetric::Cosine,
+                strategy: VectorStrategy::Exact,
+            }),
+            IndexAlgorithm::Vector(VectorAlgorithm {
+                column: ColId(1),
+                dimension: 384,
+                metric: DistanceMetric::DotProduct,
+                strategy: VectorStrategy::Hnsw(HnswParams {
+                    m: 24,
+                    ef_construction: 300,
+                    ef_search: 100,
+                    ..HnswParams::default()
+                }),
+            }),
         ];
 
         for original in &cases {
@@ -2068,6 +2200,52 @@ mod tests {
             assert_eq!(
                 *original, roundtripped,
                 "IndexAlgorithm round-trip failed: {original:?} -> {roundtripped:?}"
+            );
+        }
+    }
+
+    /// `StIndexAlgorithm` is stored in `st_index`, so its BFLATN layout is on-disk format:
+    /// if it grows, every existing database's `st_index` pages are reinterpreted wrongly.
+    /// The `Unused(u128)` variant exists to reserve 16 bytes of payload up front so that
+    /// new variants have somewhere to live; this test is what makes that reservation real.
+    ///
+    /// If you are here because this test failed, you added a variant whose payload does not
+    /// fit. Shrink it — see `StVectorIndex` for how the vector variant was packed down —
+    /// rather than raising these numbers.
+    #[test]
+    fn st_index_algorithm_layout_is_stable() {
+        use spacetimedb_sats::layout::{AlgebraicTypeLayout, HasLayout, RowTypeLayout};
+
+        // Measure the real thing: the BFLATN row layout that `st_index` pages are written
+        // with. If this changes, every existing database's `st_index` is reinterpreted
+        // wrongly on the next read.
+        let layout = RowTypeLayout::from(st_index_schema().into_row_type());
+        assert_eq!(
+            layout.size().0,
+            48,
+            "the `st_index` row layout changed; existing databases' pages would be misread"
+        );
+
+        // And pin the reservation that makes new variants possible in the first place.
+        // `StIndexAlgorithm::Unused(u128)` exists solely to claim 16 payload bytes at
+        // 16-byte alignment up front, so that later variants have somewhere to live
+        // without moving anything. Every variant must fit inside that claim.
+        let AlgebraicTypeLayout::Sum(algorithm) = &layout.elements[StIndexFields::IndexAlgorithm.col_idx()].ty else {
+            panic!("`st_index.index_algorithm` should be a sum type");
+        };
+        assert_eq!(
+            algorithm.size(),
+            32,
+            "1-byte tag padded to the 16-byte alignment, plus 16 payload bytes"
+        );
+        for variant in &algorithm.variants {
+            assert!(
+                variant.ty.size() <= 16,
+                "`StIndexAlgorithm` variant `{:?}` needs {} bytes, over the 16 reserved by `Unused(u128)`. \
+                 Pack it down rather than growing the reservation -- see `StVectorIndex` for how the vector \
+                 variant was flattened to scalars to fit.",
+                variant.name,
+                variant.ty.size(),
             );
         }
     }

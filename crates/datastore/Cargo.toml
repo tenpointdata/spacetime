@@ -15,6 +15,7 @@ spacetimedb-metrics.workspace = true
 spacetimedb-primitives.workspace = true
 spacetimedb-sats = { workspace = true, features = ["serde"] }
 spacetimedb-schema.workspace = true
+spacetimedb-vector.workspace = true
 spacetimedb-table.workspace = true
 spacetimedb-snapshot.workspace = true
 spacetimedb-execution.workspace = true

@@ -515,7 +515,9 @@ export function table<Row extends RowObj, const Opts extends TableOpts<Row>>(
         const cols =
           index.algorithm.tag === 'Direct'
             ? [index.algorithm.value]
-            : index.algorithm.value;
+            : index.algorithm.tag === 'Vector'
+              ? [index.algorithm.value.column]
+              : index.algorithm.value;
 
         const colS = cols.map(i => colNameList[i]).join('_');
         const sourceName =

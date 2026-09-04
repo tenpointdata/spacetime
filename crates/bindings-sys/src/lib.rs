@@ -883,6 +883,42 @@ pub mod raw {
         pub fn datastore_clear(table_id: TableId, out: *mut u64) -> u16;
     }
 
+    #[link(wasm_import_module = "spacetime_10.6")]
+    unsafe extern "C" {
+        /// Finds the `k` rows nearest to a query vector, using the vector index
+        /// identified by `index_id`.
+        ///
+        /// The query is `query_ptr[..query_len]`, a BSATN-encoded `Vec<f32>` whose length
+        /// must equal the index's declared dimension.
+        ///
+        /// The rows are returned in ascending order of distance under the index's metric,
+        /// nearest first, through the iterator written to `out`. At most `k` rows are
+        /// returned; fewer if the table holds fewer.
+        ///
+        /// # Traps
+        ///
+        /// Traps if:
+        /// - `query_ptr` is NULL or `query_ptr[..query_len]` is not in bounds of WASM memory.
+        /// - `out` is NULL or `out[..size_of::<RowIter>()]` is not in bounds of WASM memory.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error:
+        ///
+        /// - `NOT_IN_TRANSACTION`, when called outside of a transaction.
+        /// - `NO_SUCH_INDEX`, when `index_id` is not a known ID of an index.
+        /// - `WRONG_INDEX_ALGO`, when the index is not a vector index.
+        /// - `BSATN_DECODE_ERROR`, when `query` cannot be decoded as a `Vec<f32>`,
+        ///   or has the wrong dimension, or contains a non-finite component.
+        pub fn datastore_index_scan_vector_bsatn(
+            index_id: IndexId,
+            query_ptr: *const u8, // Vec<f32>
+            query_len: usize,
+            k: u32,
+            out: *mut RowIter,
+        ) -> u16;
+    }
+
     /// What strategy does the database index use?
     ///
     /// See also: <https://www.postgresql.org/docs/current/sql-createindex.html>
@@ -1254,6 +1290,26 @@ pub fn datastore_table_scan_bsatn(table_id: TableId) -> Result<RowIter> {
 ///   typed at the index's key type (`AlgebraicType`).
 pub fn datastore_index_scan_point_bsatn(index_id: IndexId, point: &[u8]) -> Result<RowIter> {
     let raw = unsafe { call(|out| raw::datastore_index_scan_point_bsatn(index_id, point.as_ptr(), point.len(), out))? };
+    Ok(RowIter { raw })
+}
+
+/// Finds the `k` rows nearest to `query` under the vector index identified by `index_id`.
+///
+/// `query` is a BSATN-encoded `Vec<f32>` whose length must equal the index's declared
+/// dimension. Rows are yielded nearest first.
+///
+/// # Errors
+///
+/// Returns an error:
+///
+/// - `NOT_IN_TRANSACTION`, when called outside of a transaction.
+/// - `NO_SUCH_INDEX`, when `index_id` is not a known ID of an index.
+/// - `WRONG_INDEX_ALGO`, when the index is not a vector index.
+/// - `BSATN_DECODE_ERROR`, when `query` is not a well-formed vector of the index's
+///   dimension with finite components.
+pub fn datastore_index_scan_vector_bsatn(index_id: IndexId, query: &[u8], k: u32) -> Result<RowIter> {
+    let raw =
+        unsafe { call(|out| raw::datastore_index_scan_vector_bsatn(index_id, query.as_ptr(), query.len(), k, out))? };
     Ok(RowIter { raw })
 }
 

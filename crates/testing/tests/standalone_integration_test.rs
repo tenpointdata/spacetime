@@ -506,3 +506,48 @@ fn test_submodule_in_module(module_name: &'static str) {
 fn test_submodule_typescript() {
     test_submodule_in_module("module-test-ts");
 }
+
+/// End-to-end coverage of vector (nearest-neighbour) indexes: a module declares a
+/// `Vec<f32>` column with a vector index, and reducers search it.
+///
+/// The embeddings are hand-written unit-ish vectors so the expected ranking is obvious by
+/// inspection rather than by trusting the implementation being tested.
+#[test]
+#[serial]
+fn test_vector_search() {
+    init();
+
+    CompiledModule::compile("vector-search", CompilationMode::Debug).with_module_async(
+        DEFAULT_CONFIG,
+        |mut module| async move {
+            let mut request_id = 0;
+            let mut call = |reducer: &str, args: String| {
+                let json = format!(
+                    r#"{{"CallReducer": {{"reducer": "{reducer}", "args": "{args}", "request_id": {request_id}, "flags": 0 }}}}"#
+                );
+                let id = request_id;
+                request_id += 1;
+                (json, id)
+            };
+
+            // Four documents whose embeddings point in clearly different directions.
+            for (text, embedding) in [
+                ("cats", "[1.0,0.0,0.0,0.0]"),
+                ("kittens", "[0.9,0.1,0.0,0.0]"),
+                ("dogs", "[0.0,1.0,0.0,0.0]"),
+                ("submarines", "[0.0,0.0,0.0,1.0]"),
+            ] {
+                // The reducer args are JSON nested inside a JSON string, so the quotes
+                // around `text` are escaped once.
+                let (json, id) = call("add_document", format!(r#"[\"{text}\", {embedding}]"#));
+                module.send_reducer_and_recv_update(json, id).await.unwrap();
+            }
+
+            // Nearest to "cats" should be cats itself, then kittens, then dogs.
+            let (json, id) = call("search_documents", r#"[[1.0,0.0,0.0,0.0], 3]"#.to_string());
+            module.send_reducer_and_recv_update(json, id).await.unwrap();
+
+            assert_eq!(read_logs(&module).await, ["cats", "kittens", "dogs"].map(String::from));
+        },
+    );
+}

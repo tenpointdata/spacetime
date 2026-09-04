@@ -326,6 +326,96 @@ pub enum RawIndexAlgorithm {
         /// Only one is allowed, as direct indexing with more is nonsensical.
         column: ColId,
     },
+    /// Implemented using a vector similarity index, for nearest-neighbour search
+    /// over embeddings.
+    ///
+    /// Unlike the other algorithms, this one answers a different question entirely:
+    /// not "which rows have this key?" but "which `k` rows are most similar to this
+    /// vector?". It therefore supports neither point nor range scans.
+    Vector(RawVectorIndexV9),
+}
+
+/// The parameters of a [`RawIndexAlgorithm::Vector`] index.
+///
+/// New fields MUST be added to the END of this struct, to maintain ABI compatibility.
+#[derive(Debug, Clone, SpacetimeType)]
+#[sats(crate = crate)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub struct RawVectorIndexV9 {
+    /// The column to index on. It must have type `Array(F32)`, i.e. `Vec<f32>`.
+    ///
+    /// Only one column is allowed: a vector index ranks whole vectors, and there is no
+    /// meaningful way to combine similarity across several of them.
+    pub column: ColId,
+
+    /// The number of components every vector in this column must have.
+    ///
+    /// SATS has no fixed-size array type, so dimensionality cannot be expressed by the
+    /// column's type; it is declared here instead and enforced by the index.
+    pub dimension: u32,
+
+    /// How similarity between two vectors is measured.
+    pub metric: RawVectorMetric,
+
+    /// Whether to search exhaustively or approximately.
+    pub strategy: RawVectorStrategy,
+}
+
+/// How a [`RawIndexAlgorithm::Vector`] index measures similarity.
+///
+/// New variants MUST be added to the END of this enum, to maintain ABI compatibility.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, SpacetimeType)]
+#[sats(crate = crate)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub enum RawVectorMetric {
+    /// Euclidean distance. The default.
+    #[default]
+    L2,
+    /// Cosine distance, `1 - cosine similarity`. The usual choice for text embeddings.
+    Cosine,
+    /// Negated inner product, ranking by *largest* dot product.
+    DotProduct,
+    /// Manhattan distance.
+    L1,
+}
+
+/// How a [`RawIndexAlgorithm::Vector`] index searches.
+///
+/// New variants MUST be added to the END of this enum, to maintain ABI compatibility.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, SpacetimeType)]
+#[sats(crate = crate)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub enum RawVectorStrategy {
+    /// Compare the query against every indexed vector.
+    ///
+    /// Always returns the true nearest neighbours, and always returns the same answer for
+    /// the same set of rows. The default, because a replicated database should not be
+    /// approximate unless its author asked for that.
+    #[default]
+    Exact,
+
+    /// Search an HNSW proximity graph, trading exactness for speed on large collections.
+    Hnsw(RawHnswParamsV9),
+}
+
+/// Tuning parameters for an HNSW vector index.
+///
+/// New fields MUST be added to the END of this struct, to maintain ABI compatibility.
+#[derive(Debug, Clone, Copy, SpacetimeType)]
+#[sats(crate = crate)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub struct RawHnswParamsV9 {
+    /// Edges kept per node per graph layer. Higher means better recall and more memory.
+    /// 16 is a good default.
+    pub m: u16,
+    /// Search width used while inserting. Higher builds a better graph, more slowly.
+    /// 200 is a good default.
+    pub ef_construction: u16,
+    /// Default search width used while querying; always at least `k`. Higher means better
+    /// recall and slower queries. 64 is a good default.
+    pub ef_search: u16,
 }
 
 /// Returns a btree index algorithm for the columns `cols`.
@@ -341,6 +431,16 @@ pub fn hash(cols: impl Into<ColList>) -> RawIndexAlgorithm {
 /// Returns a direct index algorithm for the column `col`.
 pub fn direct(col: impl Into<ColId>) -> RawIndexAlgorithm {
     RawIndexAlgorithm::Direct { column: col.into() }
+}
+
+/// Returns an exact vector index algorithm for the column `col`.
+pub fn vector(col: impl Into<ColId>, dimension: u32, metric: RawVectorMetric) -> RawIndexAlgorithm {
+    RawIndexAlgorithm::Vector(RawVectorIndexV9 {
+        column: col.into(),
+        dimension,
+        metric,
+        strategy: RawVectorStrategy::Exact,
+    })
 }
 
 /// Marks a table as a timer table for a scheduled reducer or procedure.

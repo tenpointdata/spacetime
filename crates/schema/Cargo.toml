@@ -13,6 +13,7 @@ test = []
 spacetimedb-lib = { workspace = true, features = ["enum-map"] }
 spacetimedb-primitives = { workspace = true, features = ["memory-usage"] }
 spacetimedb-sats = { workspace = true, features = ["memory-usage"] }
+spacetimedb-vector.workspace = true
 spacetimedb-data-structures.workspace = true
 spacetimedb-memory-usage.workspace = true
 anyhow.workspace = true

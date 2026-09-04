@@ -108,6 +108,12 @@ pub enum IndexError {
     KeyNotFound(IndexId, AlgebraicValue),
     #[error("IndexId {0:?} does not support seeking for a range")]
     IndexCannotSeekRange(IndexId),
+    #[error("IndexId {0:?} is a vector index, which supports neither point nor range scans")]
+    IndexIsVector(IndexId),
+    #[error("IndexId {0:?} is not a vector index, so it cannot answer a nearest-neighbour search")]
+    IndexIsNotVector(IndexId),
+    #[error("invalid query vector for index {0:?}: {1}")]
+    BadVectorQuery(IndexId, spacetimedb_vector::VectorError),
 }
 
 #[derive(Error, Debug, PartialEq, Eq)]

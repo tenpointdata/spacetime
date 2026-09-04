@@ -248,6 +248,13 @@ export const RawConstraintDefV9 = __t.object('RawConstraintDefV9', {
 });
 export type RawConstraintDefV9 = __Infer<typeof RawConstraintDefV9>;
 
+export const RawHnswParamsV9 = __t.object('RawHnswParamsV9', {
+  m: __t.u16(),
+  efConstruction: __t.u16(),
+  efSearch: __t.u16(),
+});
+export type RawHnswParamsV9 = __Infer<typeof RawHnswParamsV9>;
+
 export const RawHttpHandlerDefV10 = __t.object('RawHttpHandlerDefV10', {
   sourceName: __t.string(),
 });
@@ -267,6 +274,9 @@ export const RawIndexAlgorithm = __t.enum('RawIndexAlgorithm', {
   BTree: __t.array(__t.u16()),
   Hash: __t.array(__t.u16()),
   Direct: __t.u16(),
+  get Vector() {
+    return RawVectorIndexV9;
+  },
 });
 export type RawIndexAlgorithm = __Infer<typeof RawIndexAlgorithm>;
 
@@ -656,6 +666,36 @@ export const RawUniqueConstraintDataV9 = __t.object(
 export type RawUniqueConstraintDataV9 = __Infer<
   typeof RawUniqueConstraintDataV9
 >;
+
+export const RawVectorIndexV9 = __t.object('RawVectorIndexV9', {
+  column: __t.u16(),
+  dimension: __t.u32(),
+  get metric() {
+    return RawVectorMetric;
+  },
+  get strategy() {
+    return RawVectorStrategy;
+  },
+});
+export type RawVectorIndexV9 = __Infer<typeof RawVectorIndexV9>;
+
+// The tagged union or sum type for the algebraic type `RawVectorMetric`.
+export const RawVectorMetric = __t.enum('RawVectorMetric', {
+  L2: __t.unit(),
+  Cosine: __t.unit(),
+  DotProduct: __t.unit(),
+  L1: __t.unit(),
+});
+export type RawVectorMetric = __Infer<typeof RawVectorMetric>;
+
+// The tagged union or sum type for the algebraic type `RawVectorStrategy`.
+export const RawVectorStrategy = __t.enum('RawVectorStrategy', {
+  Exact: __t.unit(),
+  get Hnsw() {
+    return RawHnswParamsV9;
+  },
+});
+export type RawVectorStrategy = __Infer<typeof RawVectorStrategy>;
 
 export const RawViewDefV10 = __t.object('RawViewDefV10', {
   sourceName: __t.string(),

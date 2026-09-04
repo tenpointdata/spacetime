@@ -43,6 +43,7 @@ use core::cmp::Ordering;
 use core::ops::{Bound, Deref, RangeBounds};
 use core::{fmt, iter};
 use enum_as_inner::EnumAsInner;
+use itertools::Either;
 use spacetimedb_primitives::{ColId, ColList};
 use spacetimedb_sats::algebraic_value::de::{ValueDeserializeError, ValueDeserializer};
 use spacetimedb_sats::algebraic_value::Packed;
@@ -56,7 +57,8 @@ use spacetimedb_sats::{
     i256, u256, AlgebraicType, AlgebraicValue, ProductType, ProductTypeElement, ProductValue, SumValue, WithTypespace,
     F32, F64,
 };
-use spacetimedb_schema::def::IndexAlgorithm;
+use spacetimedb_schema::def::{IndexAlgorithm, VectorAlgorithm};
+use spacetimedb_vector::Neighbor;
 
 mod btree_index;
 mod bytes_key;
@@ -68,9 +70,11 @@ pub mod unique_btree_index;
 pub mod unique_direct_fixed_cap_index;
 pub mod unique_direct_index;
 mod unique_hash_index;
+mod vector_index;
 
 pub use self::index::{Index, IndexCannotSeekRange, IndexSeekRangeResult, RangedIndex};
 pub use self::key_size::KeySize;
+pub use self::vector_index::{VectorSearchError, VectorTableIndex};
 
 macro_rules! table_iter {
     ($(#[$wattr:meta])* pub struct $wrapper:ident =>
@@ -1082,12 +1086,17 @@ impl MemoryUsage for TypedIndex {
     }
 }
 
-#[derive(Debug, PartialEq, derive_more::From)]
-#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, derive_more::From)]
 pub enum IndexKind {
     BTree,
     Hash,
     Direct,
+    /// A vector similarity index.
+    ///
+    /// Unlike the others this carries its parameters, because a vector index cannot be
+    /// built from the key type alone: dimensionality, metric and search strategy all come
+    /// from the index definition rather than from the column.
+    Vector(VectorAlgorithm),
 }
 
 impl IndexKind {
@@ -1096,6 +1105,7 @@ impl IndexKind {
             IndexAlgorithm::BTree(_) => Self::BTree,
             IndexAlgorithm::Hash(_) => Self::Hash,
             IndexAlgorithm::Direct(_) => Self::Direct,
+            IndexAlgorithm::Vector(vector) => Self::Vector(vector.clone()),
             // This is due to `#[non_exhaustive]`.
             _ => unreachable!(),
         }
@@ -1110,6 +1120,9 @@ impl TypedIndex {
             IndexKind::Hash => Self::new_hash_index(key_type, is_unique),
             IndexKind::Direct => Self::new_direct_index(key_type, is_unique)
                 .unwrap_or_else(|| Self::new_btree_index(key_type, is_unique)),
+            // Handled by `IndexImpl::new` before we get here: a vector index is not a
+            // keyed index and has no `TypedIndex` representation.
+            IndexKind::Vector(_) => unreachable!("a vector index is not a `TypedIndex`"),
         }
     }
 
@@ -1974,11 +1987,47 @@ pub enum PointOrRange<'a> {
     Unsupported,
 }
 
+/// The two shapes an index can take.
+///
+/// Every index but one maps *keys* to rows, and is specialized by key type into
+/// [`TypedIndex`]. A vector index does not: it ranks whole vectors by distance from a
+/// query, and answers neither point nor range lookups. Rather than forcing that into
+/// `TypedIndex`'s key-driven contract — which would mean a matching key variant, a stub
+/// point iterator, and arms in a dozen `(index, key)` dispatch matches that could never
+/// fire — the split happens one level up, here.
+///
+/// The benefit of splitting *inside* [`TableIndex`] rather than beside it is that
+/// [`Table::indexes`](crate::table::Table) stays a single map of `TableIndex`. Everything
+/// that maintains an index — insertion, deletion, rollback, rebuilding after replay, the
+/// transaction/commit merge — keeps working with no changes, because a vector index simply
+/// *is* a `TableIndex`.
+#[derive(Debug, PartialEq, Eq)]
+enum IndexImpl {
+    /// An index keyed by the projection of a row onto its indexed columns.
+    Keyed(TypedIndex),
+    /// A vector similarity index. Boxed to keep [`TableIndex`] small.
+    Vector(Box<VectorTableIndex>),
+}
+
+impl MemoryUsage for IndexImpl {
+    fn heap_usage(&self) -> usize {
+        match self {
+            Self::Keyed(idx) => idx.heap_usage(),
+            Self::Vector(idx) => idx.heap_usage(),
+        }
+    }
+}
+
+/// Panic message for key-based operations attempted on a vector index.
+const VECTOR_INDEX_IS_NOT_KEYED: &str =
+    "a vector index has no keys: it answers nearest-neighbour searches, not point or range lookups. \
+     Check `TableIndex::is_vector` before performing a key-based operation on a caller-supplied index";
+
 /// An index on a set of [`ColId`]s of a table.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TableIndex {
     /// The actual index, specialized for the appropriate key type.
-    idx: TypedIndex,
+    idx: IndexImpl,
     /// The key type of this index.
     /// This is the projection of the row type to the types of the columns indexed.
     // NOTE(centril): This is accessed in index scan ABIs for decoding, so don't `Box<_>` it.
@@ -2001,6 +2050,8 @@ impl MemoryUsage for TableIndex {
     }
 }
 
+// `IndexImpl` adds a discriminant to the 64-byte `TypedIndex`, so this is 8 bytes larger
+// than it was before vector indexes existed. There are a handful of indexes per table.
 static_assert_size!(TableIndex, 96);
 
 impl TableIndex {
@@ -2012,19 +2063,64 @@ impl TableIndex {
         is_unique: bool,
     ) -> Result<Self, InvalidFieldError> {
         let key_type = row_type.project(&indexed_columns)?;
-        let typed_index = TypedIndex::new(&key_type, index_kind, is_unique);
+        let idx = match index_kind {
+            IndexKind::Vector(algorithm) => IndexImpl::Vector(Box::new(
+                VectorTableIndex::new(&algorithm)
+                    // Schema validation has already bounded the dimension, so this cannot
+                    // fire for an index that reached the storage engine.
+                    .expect("a validated vector index definition should have a valid dimension"),
+            )),
+            kind => IndexImpl::Keyed(TypedIndex::new(&key_type, kind, is_unique)),
+        };
         Ok(Self {
-            idx: typed_index,
+            idx,
             key_type,
             indexed_columns,
         })
+    }
+
+    /// Returns the vector index behind `self`, or `None` if this is a keyed index.
+    #[inline]
+    pub fn as_vector(&self) -> Option<&VectorTableIndex> {
+        match &self.idx {
+            IndexImpl::Vector(idx) => Some(idx),
+            IndexImpl::Keyed(_) => None,
+        }
+    }
+
+    /// Whether this is a vector index.
+    ///
+    /// A vector index answers neither point nor range lookups, so callers holding a
+    /// user-supplied index id must check this before treating the index as scannable.
+    #[inline]
+    pub fn is_vector(&self) -> bool {
+        matches!(self.idx, IndexImpl::Vector(_))
+    }
+
+    /// Returns the `k` rows whose vectors are nearest to `query`, nearest first.
+    ///
+    /// `keep` filters candidates by row pointer, which is how a transaction hides rows it
+    /// has deleted that are still present in the committed index.
+    pub fn search_knn(
+        &self,
+        query: &[f32],
+        k: usize,
+        keep: impl Fn(&RowPointer) -> bool,
+    ) -> Result<Vec<Neighbor<RowPointer>>, VectorSearchError> {
+        match &self.idx {
+            IndexImpl::Vector(idx) => Ok(idx.search(query, k, keep)?),
+            IndexImpl::Keyed(_) => Err(VectorSearchError::NotAVectorIndex),
+        }
     }
 
     /// Clones the structure of this index but not the indexed elements,
     /// so the returned index is empty.
     pub fn clone_structure(&self) -> Self {
         let key_type = self.key_type.clone();
-        let idx = self.idx.clone_structure();
+        let idx = match &self.idx {
+            IndexImpl::Keyed(idx) => IndexImpl::Keyed(idx.clone_structure()),
+            IndexImpl::Vector(idx) => IndexImpl::Vector(Box::new(idx.clone_structure())),
+        };
         let indexed_columns = self.indexed_columns.clone();
         Self {
             idx,
@@ -2034,13 +2130,23 @@ impl TableIndex {
     }
 
     /// Returns whether this is a unique index or not.
+    ///
+    /// A vector index is never unique: two rows may hold identical embeddings, and a
+    /// unique constraint is not something similarity search can enforce. Reporting `false`
+    /// also keeps [`Table`](crate::table::Table)'s pointer-map invariant untouched.
     pub fn is_unique(&self) -> bool {
-        self.idx.is_unique()
+        match &self.idx {
+            IndexImpl::Keyed(idx) => idx.is_unique(),
+            IndexImpl::Vector(_) => false,
+        }
     }
 
     /// Returns whether this index supports range queries.
     pub fn is_ranged(&self) -> bool {
-        self.idx.is_ranged()
+        match &self.idx {
+            IndexImpl::Keyed(idx) => idx.is_ranged(),
+            IndexImpl::Vector(_) => false,
+        }
     }
 
     /// Returns the indexed columns of this index.
@@ -2074,7 +2180,31 @@ impl TableIndex {
     /// Panics if `value` is not consistent with this index's key type.
     #[inline]
     pub fn key_from_algebraic_value<'a>(&self, value: &'a AlgebraicValue) -> IndexKey<'a> {
-        TypedIndexKey::from_algebraic_value(&self.key_type, &self.idx, value).into()
+        TypedIndexKey::from_algebraic_value(&self.key_type, self.keyed(), value).into()
+    }
+
+    /// The keyed index behind `self`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is a vector index. Every caller reaches a key-based operation, which
+    /// a vector index does not support; callers holding a user-supplied index id must
+    /// reject it with [`Self::is_vector`] first.
+    #[inline]
+    fn keyed(&self) -> &TypedIndex {
+        match &self.idx {
+            IndexImpl::Keyed(idx) => idx,
+            IndexImpl::Vector(_) => panic!("{VECTOR_INDEX_IS_NOT_KEYED}"),
+        }
+    }
+
+    /// The keyed index behind `self`, mutably. See [`Self::keyed`].
+    #[inline]
+    fn keyed_mut(&mut self) -> &mut TypedIndex {
+        match &mut self.idx {
+            IndexImpl::Keyed(idx) => idx,
+            IndexImpl::Vector(_) => panic!("{VECTOR_INDEX_IS_NOT_KEYED}"),
+        }
     }
 
     /// Derives bounds from `prefix` and `bounds`
@@ -2116,7 +2246,7 @@ impl TableIndex {
                 };
             }
 
-            match &self.idx {
+            match self.keyed() {
                 BTreeBytesKey8(_) | UniqueBTreeBytesKey8(_) => bounds_for_bytes_key!(TypedIndexKey::BytesKey8B),
                 BTreeBytesKey16(_) | UniqueBTreeBytesKey16(_) => bounds_for_bytes_key!(TypedIndexKey::BytesKey16),
                 BTreeBytesKey32(_) | UniqueBTreeBytesKey32(_) => bounds_for_bytes_key!(TypedIndexKey::BytesKey32),
@@ -2184,7 +2314,7 @@ impl TableIndex {
     /// Returns an error if `bytes` is not properly encoded for this index's key type.
     #[inline]
     pub fn key_from_bsatn<'de>(&self, bytes: &'de [u8]) -> DecodeResult<IndexKey<'de>> {
-        Ok(TypedIndexKey::from_bsatn(&self.idx, &self.key_type, bytes)?.into())
+        Ok(TypedIndexKey::from_bsatn(self.keyed(), &self.key_type, bytes)?.into())
     }
 
     /// Derives bounds from `prefix`, `rstart`, and `rend`, all encoded in BSATN,
@@ -2237,7 +2367,7 @@ impl TableIndex {
                 };
             }
 
-            match &self.idx {
+            match self.keyed() {
                 BTreeBytesKey8(_) | UniqueBTreeBytesKey8(_) => bounds_for_bytes_key!(TypedIndexKey::BytesKey8B),
                 BTreeBytesKey16(_) | UniqueBTreeBytesKey16(_) => bounds_for_bytes_key!(TypedIndexKey::BytesKey16),
                 BTreeBytesKey32(_) | UniqueBTreeBytesKey32(_) => bounds_for_bytes_key!(TypedIndexKey::BytesKey32),
@@ -2479,7 +2609,7 @@ impl TableIndex {
         // SAFETY:
         // 1. We're passing the same `ColList` that was provided during construction.
         // 2. Forward caller requirements.
-        unsafe { TypedIndexKey::from_row_ref(&self.key_type, &self.idx, &self.indexed_columns, row_ref) }.into()
+        unsafe { TypedIndexKey::from_row_ref(&self.key_type, self.keyed(), &self.indexed_columns, row_ref) }.into()
     }
 
     /// Projects `row_ref` to the columns of `self`.
@@ -2504,9 +2634,18 @@ impl TableIndex {
     /// It also follows from `row_ref`'s type/layout
     /// being the same as passed in on `self`'s construction.
     pub unsafe fn check_and_insert(&mut self, row_ref: RowRef<'_>) -> Result<(), RowPointer> {
-        // SAFETY: Forward the caller's proof obligation.
-        let key = unsafe { self.key_from_row(row_ref).key };
-        self.idx.insert(key, row_ref.pointer())
+        match &mut self.idx {
+            IndexImpl::Keyed(_) => {
+                // SAFETY: Forward the caller's proof obligation.
+                let key = unsafe { self.key_from_row(row_ref).key };
+                self.keyed_mut().insert(key, row_ref.pointer())
+            }
+            // A vector index has no unique constraint to violate, so this always succeeds.
+            IndexImpl::Vector(idx) => {
+                idx.insert(&self.indexed_columns, row_ref);
+                Ok(())
+            }
+        }
     }
 
     /// Deletes `row_ref` with its indexed value `row_ref.project(&self.indexed_columns)` from this index.
@@ -2521,13 +2660,25 @@ impl TableIndex {
     /// It also follows from `row_ref`'s type/layout
     /// being the same as passed in on `self`'s construction.
     pub unsafe fn delete(&mut self, row_ref: RowRef<'_>) -> bool {
-        // SAFETY: Forward the caller's proof obligation.
-        let key = unsafe { self.key_from_row(row_ref).key };
-        self.idx.delete(&key.borrowed(), row_ref.pointer())
+        match &mut self.idx {
+            IndexImpl::Keyed(_) => {
+                // SAFETY: Forward the caller's proof obligation.
+                let key = unsafe { self.key_from_row(row_ref).key };
+                self.keyed_mut().delete(&key.borrowed(), row_ref.pointer())
+            }
+            // Keyed by row pointer, so the row's contents are not needed. That matters:
+            // deletion must succeed even for a row whose vector could not be indexed.
+            IndexImpl::Vector(idx) => idx.delete(row_ref.pointer()),
+        }
     }
 
     /// Returns whether `value` is in this index.
     pub fn contains_any(&self, value: &AlgebraicValue) -> bool {
+        if self.is_vector() {
+            // A vector index cannot answer "is this exact value present?" without a linear
+            // scan, and no caller needs it to; say no rather than pretend.
+            return false;
+        }
         let key = self.key_from_algebraic_value(value);
         self.seek_point(&key).next().is_some()
     }
@@ -2536,6 +2687,9 @@ impl TableIndex {
     /// Returns `None` if 0.
     /// Returns `Some(1)` if the index is unique.
     pub fn count(&self, value: &AlgebraicValue) -> Option<usize> {
+        if self.is_vector() {
+            return None;
+        }
         let key = self.key_from_algebraic_value(value);
         match self.seek_point(&key).count() {
             0 => None,
@@ -2546,7 +2700,7 @@ impl TableIndex {
     /// Returns an iterator that yields all the `RowPointer`s for the given `key`.
     #[inline]
     pub fn seek_point(&self, key: &IndexKey<'_>) -> TableIndexPointIter<'_> {
-        let iter = self.idx.seek_point(&key.key);
+        let iter = self.keyed().seek_point(&key.key);
         TableIndexPointIter { iter }
     }
 
@@ -2557,8 +2711,11 @@ impl TableIndex {
     /// For example, while btree and direct indices yield in key-sorted order,
     /// hash indices provide a non-deterministic order.
     /// As such, it's best not to rely on the order at all.
-    pub fn iter(&self) -> TableIndexIter<'_> {
-        TableIndexIter { iter: self.idx.iter() }
+    pub fn iter(&self) -> impl Iterator<Item = RowPointer> + '_ {
+        match &self.idx {
+            IndexImpl::Keyed(idx) => Either::Left(TableIndexIter { iter: idx.iter() }),
+            IndexImpl::Vector(idx) => Either::Right(idx.iter()),
+        }
     }
 
     /// Returns an iterator over the [TableIndex],
@@ -2572,7 +2729,12 @@ impl TableIndex {
         let start = range.start_bound().map(|v| &v.key);
         let end = range.end_bound().map(|v| &v.key);
         let range = (start, end);
-        let iter = self.idx.seek_range(&range)?;
+        let iter = match &self.idx {
+            IndexImpl::Keyed(idx) => idx.seek_range(&range)?,
+            // A vector index reports `is_ranged() == false`, so callers reach this only by
+            // ignoring that; answer with the same error a hash index gives.
+            IndexImpl::Vector(_) => return Err(IndexCannotSeekRange),
+        };
         Ok(TableIndexRangeIter { iter })
     }
 
@@ -2602,7 +2764,15 @@ impl TableIndex {
     /// The closure `ignore` indicates whether a row in `self` should be ignored.
     pub fn can_merge(&self, other: &Self, ignore: impl Fn(&RowPointer) -> bool) -> Result<(), RowPointer> {
         use TypedIndex::*;
-        match (&self.idx, &other.idx) {
+        let (IndexImpl::Keyed(this), IndexImpl::Keyed(other)) = (&self.idx, &other.idx) else {
+            // A vector index has no uniqueness to violate, so two of them always merge.
+            debug_assert!(
+                self.is_vector() && other.is_vector(),
+                "merging indexes of different kinds"
+            );
+            return Ok(());
+        };
+        match (this, other) {
             // For non-unique indices, it's always possible to merge.
             (BTreeBool(_), BTreeBool(_))
             | (BTreeU8(_), BTreeU8(_))
@@ -2710,21 +2880,31 @@ impl TableIndex {
     /// Returns `Ok(())` if the index was already unique or was successfully converted.
     /// Returns `Err(ptr)` where `ptr` witnesses a duplicate key, leaving `self` unchanged.
     pub fn make_unique(&mut self) -> Result<(), RowPointer> {
-        self.idx.make_unique()
+        match &mut self.idx {
+            IndexImpl::Keyed(idx) => idx.make_unique(),
+            // A vector index cannot back a unique constraint, and schema validation does
+            // not let one try; nothing to do.
+            IndexImpl::Vector(_) => Ok(()),
+        }
     }
 
     /// Convert this unique index back to a non-unique index in place.
     ///
     /// No-op for already non-unique or direct indices.
     pub fn make_non_unique(&mut self) {
-        self.idx.make_non_unique()
+        if let IndexImpl::Keyed(idx) = &mut self.idx {
+            idx.make_non_unique();
+        }
     }
 
     /// Returns all duplicate keys (count > 1) in this index,
     /// with keys converted to [`AlgebraicValue`] via the index's key type.
     /// Returns an empty vec for unique indices.
     pub fn iter_duplicates(&self) -> Vec<(AlgebraicValue, usize)> {
-        self.idx.iter_duplicates(&self.key_type)
+        match &self.idx {
+            IndexImpl::Keyed(idx) => idx.iter_duplicates(&self.key_type),
+            IndexImpl::Vector(_) => Vec::new(),
+        }
     }
 
     /// Deletes all entries from the index, leaving it empty.
@@ -2733,12 +2913,20 @@ impl TableIndex {
     /// we clear the tx state's index and insert it,
     /// rather than constructing a new `TableIndex`.
     pub fn clear(&mut self) {
-        self.idx.clear();
+        match &mut self.idx {
+            IndexImpl::Keyed(idx) => idx.clear(),
+            IndexImpl::Vector(idx) => idx.clear(),
+        }
     }
 
     /// The number of unique keys in this index.
     pub fn num_keys(&self) -> usize {
-        self.idx.num_keys()
+        match &self.idx {
+            IndexImpl::Keyed(idx) => idx.num_keys(),
+            // Every vector is its own key: two rows with identical embeddings are two
+            // distinct entries, since there is no key to deduplicate on.
+            IndexImpl::Vector(idx) => idx.num_rows(),
+        }
     }
 
     /// The number of rows stored in this index.
@@ -2747,7 +2935,10 @@ impl TableIndex {
     ///
     /// This method runs in constant time.
     pub fn num_rows(&self) -> u64 {
-        self.idx.num_rows() as u64
+        match &self.idx {
+            IndexImpl::Keyed(idx) => idx.num_rows() as u64,
+            IndexImpl::Vector(idx) => idx.num_rows() as u64,
+        }
     }
 
     /// The number of bytes stored in keys in this index.
@@ -2759,7 +2950,10 @@ impl TableIndex {
     ///
     /// See the [`KeySize`] trait for more details on how this method computes its result.
     pub fn num_key_bytes(&self) -> u64 {
-        self.idx.num_key_bytes()
+        match &self.idx {
+            IndexImpl::Keyed(idx) => idx.num_key_bytes(),
+            IndexImpl::Vector(idx) => idx.num_key_bytes(),
+        }
     }
 }
 
@@ -2813,6 +3007,21 @@ mod test {
         /// Returns a strategy generating a ranged index kind.
         fn gen_for_ranged() -> impl Strategy<Value = Self> {
             any::<bool>().prop_map(|is_direct| if is_direct { Self::Direct } else { Self::BTree })
+        }
+    }
+
+    /// Generates the *keyed* index kinds.
+    ///
+    /// The tests in this module are about key-based behaviour — point seeks, range seeks,
+    /// uniqueness — none of which a vector index has. A vector index also needs a
+    /// `Vec<f32>` column, which the row-type generators here do not produce. Vector indexes
+    /// have their own tests in [`super::vector_index`] and in `table.rs`.
+    impl proptest::arbitrary::Arbitrary for IndexKind {
+        type Parameters = ();
+        type Strategy = proptest::strategy::BoxedStrategy<Self>;
+
+        fn arbitrary_with((): ()) -> Self::Strategy {
+            prop_oneof![Just(Self::BTree), Just(Self::Hash), Just(Self::Direct)].boxed()
         }
     }
 
@@ -2950,7 +3159,7 @@ mod test {
             let (mut table, pool, mut blob_store) = setup(ty);
             let row_ref = table.insert(&pool, &mut blob_store, &pv).unwrap().1;
             prop_assert_eq!(unsafe { index.delete(row_ref) }, false);
-            prop_assert!(index.idx.is_empty());
+            prop_assert!(index.keyed().is_empty());
             prop_assert_eq!(index.num_keys(), 0);
             prop_assert_eq!(index.num_key_bytes(), 0);
             prop_assert_eq!(index.num_rows(), 0);

@@ -66,6 +66,21 @@ pub enum ValidationError {
         column: RawIdentifier,
         ty: PrettyAlgebraicType,
     },
+    #[error(
+        "vector index `{index}` requires a column of type `Vec<f32>` (`Array(F32)`), \
+         but column `{column}` has type `{ty}`"
+    )]
+    VectorIndexOnBadType {
+        index: RawIdentifier,
+        column: RawIdentifier,
+        ty: PrettyAlgebraicType,
+    },
+    #[error("vector index `{index}` declares dimension {dimension}, which must be between 1 and {max} inclusive")]
+    VectorIndexBadDimension {
+        index: RawIdentifier,
+        dimension: u32,
+        max: u32,
+    },
     #[error("def `{def}` has duplicate columns: {columns:?}")]
     DuplicateColumns { def: RawIdentifier, columns: ColList },
     #[error("invalid sequence column type: {column} with type `{column_type:?}` in sequence `{sequence}`")]

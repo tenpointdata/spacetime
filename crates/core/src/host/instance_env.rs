@@ -667,6 +667,38 @@ impl InstanceEnv {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
+    pub fn datastore_index_scan_vector_bsatn_chunks(
+        &self,
+        pool: &mut ChunkPool,
+        index_id: IndexId,
+        query: &[u8],
+        k: u32,
+    ) -> Result<Vec<Vec<u8>>, NodesError> {
+        let tx = &mut *self.get_tx()?;
+
+        // Run the search. Unlike the other scans this collects eagerly: ranking is not
+        // something that can be produced lazily, since the nearest row is only known once
+        // every candidate has been considered.
+        let (table_id, rows) = self.relational_db().index_scan_vector(tx, index_id, query, k)?;
+
+        // Serialize the rows to BSATN.
+        let (chunks, rows_scanned, bytes_scanned) = ChunkedWriter::collect_iter(pool, rows.into_iter());
+
+        // Record the number of rows and the number of bytes scanned.
+        tx.metrics.index_seeks += 1;
+        tx.metrics.bytes_scanned += bytes_scanned;
+        tx.metrics.rows_scanned += rows_scanned;
+
+        // A nearest-neighbour result set is not characterized by a key, so for the purpose
+        // of view invalidation it has to be treated as a full table scan: any write to the
+        // table could change which rows are nearest. This mirrors what a range scan does
+        // when it cannot reduce to a point.
+        tx.record_table_scan(&self.func_type, table_id);
+
+        Ok(chunks)
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
     pub fn datastore_index_scan_range_bsatn_chunks(
         &self,
         pool: &mut ChunkPool,

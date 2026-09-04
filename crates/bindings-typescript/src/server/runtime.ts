@@ -1186,6 +1186,10 @@ export function makeTableView(
       case 'Direct':
         column_ids = [indexDef.algorithm.value];
         break;
+      case 'Vector':
+        // Vector indexes are searched by distance through `vectorSearch`, not by key,
+        // so there is no point/range accessor to hang off the table view.
+        continue;
     }
     const numColumns = column_ids.length;
 

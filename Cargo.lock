@@ -8039,6 +8039,7 @@ dependencies = [
  "spacetimedb-schema",
  "spacetimedb-snapshot",
  "spacetimedb-table",
+ "spacetimedb-vector",
  "strum",
  "thin-vec",
  "thiserror 1.0.69",
@@ -8435,6 +8436,7 @@ dependencies = [
  "spacetimedb-primitives",
  "spacetimedb-sats",
  "spacetimedb-testing",
+ "spacetimedb-vector",
  "termcolor",
  "thiserror 1.0.69",
  "unicode-ident",
@@ -8617,6 +8619,7 @@ dependencies = [
  "spacetimedb-primitives",
  "spacetimedb-sats",
  "spacetimedb-schema",
+ "spacetimedb-vector",
  "thiserror 1.0.69",
 ]
 
@@ -8675,6 +8678,14 @@ dependencies = [
  "tracing",
  "windows-sys 0.59.0",
  "zip",
+]
+
+[[package]]
+name = "spacetimedb-vector"
+version = "2.9.0"
+dependencies = [
+ "proptest",
+ "spacetimedb-memory-usage",
 ]
 
 [[package]]
@@ -10084,6 +10095,14 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "vector-search"
+version = "0.0.0"
+dependencies = [
+ "log",
+ "spacetimedb",
+]
 
 [[package]]
 name = "version_check"

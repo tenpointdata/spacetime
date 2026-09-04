@@ -1472,6 +1472,232 @@ pub(crate) mod tests {
         )
     }
 
+    /// Tests for `MutTxId::index_scan_vector`, which is the only index read that cannot
+    /// reuse the tx/commit fusion machinery. See its docs for why.
+    mod vector_scan {
+        // Import selectively rather than glob: the parent test module glob-imports
+        // `system_tables::tests`, which shadows `assert_eq!` and `IndexAlgorithm`.
+        use super::{begin_mut_tx, get_datastore, insert, user_public_table, ResultTest};
+        use crate::error::{DatastoreError, IndexError};
+        use crate::locking_tx_datastore::datastore::Locking;
+        use crate::locking_tx_datastore::state_view::StateView as _;
+        use crate::locking_tx_datastore::MutTxId;
+        use crate::traits::MutTx as _;
+        use crate::traits::MutTxDatastore as _;
+        use spacetimedb_primitives::{ColId, IndexId, TableId};
+        use spacetimedb_sats::{product, AlgebraicType, AlgebraicValue, ProductValue};
+        use spacetimedb_schema::def::{IndexAlgorithm, VectorAlgorithm, VectorStrategy};
+        use spacetimedb_schema::identifier::Identifier;
+        use spacetimedb_schema::schema::{ColumnSchema, IndexSchema};
+        use spacetimedb_vector::DistanceMetric;
+
+        /// A table of `(id: u32, embedding: Vec<f32>)` with a 2-D vector index on the
+        /// embedding.
+        fn setup() -> ResultTest<(Locking, MutTxId, TableId, IndexId)> {
+            let cols = vec![
+                ColumnSchema {
+                    table_id: TableId::SENTINEL,
+                    col_pos: 0.into(),
+                    col_name: Identifier::for_test("id"),
+                    alias: None,
+                    col_type: AlgebraicType::U32,
+                },
+                ColumnSchema {
+                    table_id: TableId::SENTINEL,
+                    col_pos: 1.into(),
+                    col_name: Identifier::for_test("embedding"),
+                    alias: None,
+                    col_type: AlgebraicType::array(AlgebraicType::F32),
+                },
+            ];
+            let schema = user_public_table(cols, vec![], vec![], vec![], None, None);
+
+            let datastore = get_datastore()?;
+            let mut tx = begin_mut_tx(&datastore);
+            let table_id = datastore.create_table_mut_tx(&mut tx, schema)?;
+
+            let index_id = datastore.create_index_mut_tx(
+                &mut tx,
+                IndexSchema {
+                    index_id: IndexId::SENTINEL,
+                    table_id,
+                    index_name: "Foo_embedding_idx_vector".into(),
+                    alias: None,
+                    index_algorithm: IndexAlgorithm::Vector(VectorAlgorithm {
+                        column: 1.into(),
+                        dimension: 2,
+                        metric: DistanceMetric::L2,
+                        strategy: VectorStrategy::Exact,
+                    }),
+                },
+                false,
+            )?;
+            Ok((datastore, tx, table_id, index_id))
+        }
+
+        fn row(id: u32, embedding: [f32; 2]) -> ProductValue {
+            let embedding: Box<[spacetimedb_sats::F32]> =
+                embedding.iter().map(|c| spacetimedb_sats::F32::from(*c)).collect();
+            product![id, AlgebraicValue::Array(spacetimedb_sats::ArrayValue::F32(embedding))]
+        }
+
+        /// The ids of the `k` nearest rows to `query`, nearest first.
+        fn nearest(tx: &MutTxId, index_id: IndexId, query: [f32; 2], k: usize) -> Vec<u32> {
+            let (_, rows) = tx.index_scan_vector(index_id, &query, k).unwrap();
+            rows.into_iter().map(|r| r.read_col::<u32>(ColId(0)).unwrap()).collect()
+        }
+
+        #[test]
+        fn finds_nearest_rows_inserted_in_this_transaction() -> ResultTest<()> {
+            let (datastore, mut tx, table_id, index_id) = setup()?;
+            for (id, e) in [(1, [0.0, 0.0]), (2, [1.0, 0.0]), (3, [5.0, 0.0])] {
+                insert(&datastore, &mut tx, table_id, &row(id, e))?;
+            }
+            assert_eq!(nearest(&tx, index_id, [0.9, 0.0], 2), vec![2, 1]);
+            Ok(())
+        }
+
+        /// The heart of the tx/commit fusion: results must span both states, ordered by
+        /// distance rather than by which state they came from.
+        #[test]
+        fn merges_committed_and_uncommitted_rows_by_distance() -> ResultTest<()> {
+            let (datastore, mut tx, table_id, index_id) = setup()?;
+            for (id, e) in [(1, [0.0, 0.0]), (2, [4.0, 0.0]), (3, [8.0, 0.0])] {
+                insert(&datastore, &mut tx, table_id, &row(id, e))?;
+            }
+            datastore.commit_mut_tx(tx)?;
+
+            let mut tx = begin_mut_tx(&datastore);
+            // Interleave with the committed rows: 2.0 and 6.0 sit between them.
+            for (id, e) in [(4, [2.0, 0.0]), (5, [6.0, 0.0])] {
+                insert(&datastore, &mut tx, table_id, &row(id, e))?;
+            }
+
+            assert_eq!(nearest(&tx, index_id, [0.0, 0.0], 5), vec![1, 4, 2, 5, 3]);
+            assert_eq!(nearest(&tx, index_id, [7.0, 0.0], 3), vec![5, 3, 2]);
+            Ok(())
+        }
+
+        /// Deleting a committed row only sets a bit in the delete table; the committed
+        /// index still holds it. If the tombstone check were applied *after* taking the
+        /// nearest `k`, this would return fewer than `k` rows.
+        #[test]
+        fn a_row_deleted_in_this_transaction_is_replaced_not_dropped() -> ResultTest<()> {
+            let (datastore, mut tx, table_id, index_id) = setup()?;
+            for (id, e) in [(1, [1.0, 0.0]), (2, [2.0, 0.0]), (3, [3.0, 0.0]), (4, [4.0, 0.0])] {
+                insert(&datastore, &mut tx, table_id, &row(id, e))?;
+            }
+            datastore.commit_mut_tx(tx)?;
+
+            let mut tx = begin_mut_tx(&datastore);
+            assert_eq!(nearest(&tx, index_id, [0.0, 0.0], 2), vec![1, 2]);
+
+            let deleted = datastore.delete_by_rel_mut_tx(&mut tx, table_id, [row(1, [1.0, 0.0])]);
+            assert_eq!(deleted, 1);
+
+            // Row 3 must be promoted into the top 2, not silently missing.
+            assert_eq!(nearest(&tx, index_id, [0.0, 0.0], 2), vec![2, 3]);
+            Ok(())
+        }
+
+        /// A row inserted and then deleted in the same transaction must not surface.
+        #[test]
+        fn a_row_inserted_and_deleted_in_this_transaction_does_not_surface() -> ResultTest<()> {
+            let (datastore, mut tx, table_id, index_id) = setup()?;
+            insert(&datastore, &mut tx, table_id, &row(1, [1.0, 0.0]))?;
+            insert(&datastore, &mut tx, table_id, &row(2, [2.0, 0.0]))?;
+            let deleted = datastore.delete_by_rel_mut_tx(&mut tx, table_id, [row(1, [1.0, 0.0])]);
+            assert_eq!(deleted, 1);
+
+            assert_eq!(nearest(&tx, index_id, [0.0, 0.0], 5), vec![2]);
+            Ok(())
+        }
+
+        /// Committing must carry the index over to the committed state.
+        #[test]
+        fn results_survive_a_commit() -> ResultTest<()> {
+            let (datastore, mut tx, table_id, index_id) = setup()?;
+            for (id, e) in [(1, [0.0, 1.0]), (2, [0.0, 2.0])] {
+                insert(&datastore, &mut tx, table_id, &row(id, e))?;
+            }
+            datastore.commit_mut_tx(tx)?;
+
+            let tx = begin_mut_tx(&datastore);
+            assert_eq!(nearest(&tx, index_id, [0.0, 0.0], 2), vec![1, 2]);
+            Ok(())
+        }
+
+        #[test]
+        fn asking_for_more_than_exists_returns_everything() -> ResultTest<()> {
+            let (datastore, mut tx, table_id, index_id) = setup()?;
+            insert(&datastore, &mut tx, table_id, &row(1, [1.0, 1.0]))?;
+            assert_eq!(nearest(&tx, index_id, [0.0, 0.0], 100), vec![1]);
+            assert!(nearest(&tx, index_id, [0.0, 0.0], 0).is_empty());
+            Ok(())
+        }
+
+        #[test]
+        fn a_malformed_query_is_rejected() -> ResultTest<()> {
+            let (datastore, mut tx, table_id, index_id) = setup()?;
+            insert(&datastore, &mut tx, table_id, &row(1, [1.0, 1.0]))?;
+            assert!(tx.index_scan_vector(index_id, &[1.0], 1).is_err(), "wrong dimension");
+            assert!(
+                tx.index_scan_vector(index_id, &[1.0, f32::NAN], 1).is_err(),
+                "non-finite"
+            );
+            Ok(())
+        }
+
+        /// A caller-supplied index id may name any index, so both directions must be
+        /// rejected cleanly rather than panicking deep in the key machinery.
+        #[test]
+        fn the_wrong_kind_of_index_is_rejected_in_both_directions() -> ResultTest<()> {
+            let (datastore, mut tx, table_id, vector_index_id) = setup()?;
+            let btree_index_id = datastore.create_index_mut_tx(
+                &mut tx,
+                IndexSchema {
+                    index_id: IndexId::SENTINEL,
+                    table_id,
+                    index_name: "Foo_id_idx_btree".into(),
+                    alias: None,
+                    index_algorithm: IndexAlgorithm::BTree(0.into()),
+                },
+                false,
+            )?;
+
+            // A nearest-neighbour search against a btree index.
+            assert!(matches!(
+                tx.index_scan_vector(btree_index_id, &[1.0, 1.0], 1),
+                Err(DatastoreError::Index(IndexError::IndexIsNotVector(_)))
+            ));
+            // And a point scan against a vector index.
+            assert!(matches!(
+                tx.index_scan_point(vector_index_id, &[]),
+                Err(DatastoreError::Index(IndexError::IndexIsVector(_)))
+            ));
+            Ok(())
+        }
+
+        /// A vector index must never be chosen for a relational lookup, even when a btree
+        /// index on the same column exists to be found instead.
+        #[test]
+        fn a_vector_index_is_not_used_for_equality_lookups() -> ResultTest<()> {
+            let (datastore, mut tx, table_id, _) = setup()?;
+            insert(&datastore, &mut tx, table_id, &row(1, [1.0, 0.0]))?;
+            insert(&datastore, &mut tx, table_id, &row(2, [2.0, 0.0]))?;
+
+            // Looking up by the embedding column must fall back to a table scan rather
+            // than reaching into the vector index's key machinery.
+            let needle = row(2, [2.0, 0.0]).elements[1].clone();
+            let found: Vec<u32> = tx
+                .iter_by_col_eq(table_id, ColId(1), &needle)?
+                .map(|r| r.read_col::<u32>(ColId(0)).unwrap())
+                .collect();
+            assert_eq!(found, vec![2]);
+            Ok(())
+        }
+    }
+
     fn setup_table_with_indices(
         indices: impl Into<Vec<IndexSchema>>,
         constraints: impl Into<Vec<ConstraintSchema>>,

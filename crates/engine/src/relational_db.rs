@@ -11,7 +11,7 @@ use spacetimedb_commitlog::repo::OnNewSegmentFn;
 use spacetimedb_commitlog::{self as commitlog, SizeOnDisk};
 use spacetimedb_data_structures::map::HashSet;
 use spacetimedb_datastore::db_metrics::DB_METRICS;
-use spacetimedb_datastore::error::{DatastoreError, TableError, ViewError};
+use spacetimedb_datastore::error::{DatastoreError, IndexError, TableError, ViewError};
 use spacetimedb_datastore::execution_context::{ReducerContext, Workload, WorkloadType};
 use spacetimedb_datastore::locking_tx_datastore::datastore::TxMetrics;
 use spacetimedb_datastore::locking_tx_datastore::state_view::{
@@ -49,7 +49,7 @@ use spacetimedb_runtime::sync::watch;
 use spacetimedb_runtime::Handle;
 use spacetimedb_sats::memory_usage::MemoryUsage;
 use spacetimedb_sats::raw_identifier::RawIdentifier;
-use spacetimedb_sats::{AlgebraicType, AlgebraicValue, ProductType, ProductValue};
+use spacetimedb_sats::{bsatn, AlgebraicType, AlgebraicValue, ProductType, ProductValue};
 use spacetimedb_schema::def::{ModuleDef, TableDef, ViewDef};
 use spacetimedb_schema::identifier::NamespacePath;
 use spacetimedb_schema::reducer_name::ReducerName;
@@ -1581,6 +1581,22 @@ impl RelationalDB {
         Ok(tx.index_scan_point(index_id, point)?)
     }
 
+    /// Returns the `k` rows nearest to `query` under the vector index `index_id`,
+    /// nearest first.
+    ///
+    /// `query` is a BSATN-encoded `Vec<f32>` whose length must equal the index's declared
+    /// dimension.
+    pub fn index_scan_vector<'a>(
+        &'a self,
+        tx: &'a MutTx,
+        index_id: IndexId,
+        query: &[u8],
+        k: u32,
+    ) -> Result<(TableId, Vec<RowRef<'a>>), DBError> {
+        let query: Vec<f32> = bsatn::from_slice(query).map_err(|e| DBError::Datastore(IndexError::Decode(e).into()))?;
+        Ok(tx.index_scan_vector(index_id, &query, k as usize)?)
+    }
+
     pub fn insert<'a>(
         &'a self,
         tx: &'a mut MutTx,
@@ -2452,7 +2468,7 @@ mod tests {
     use commitlog::Commitlog;
     use pretty_assertions::{assert_eq, assert_matches};
     use spacetimedb_data_structures::map::IntMap;
-    use spacetimedb_datastore::error::{DatastoreError, IndexError};
+    use spacetimedb_datastore::error::DatastoreError;
     use spacetimedb_datastore::execution_context::ReducerContext;
     use spacetimedb_datastore::locking_tx_datastore::ViewInstanceArgs;
     use spacetimedb_datastore::system_tables::{
