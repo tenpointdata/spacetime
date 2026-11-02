@@ -1,0 +1,290 @@
+{
+  "method": "Literal newline count with final unterminated line counted; bytes verified against immutable git blob SHA. Local git cat-file reads repair text-normalized GraphQL responses when needed.",
+  "extensions": [
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".mts",
+    ".cts",
+    ".vue",
+    ".svelte",
+    ".astro",
+    ".html",
+    ".htm",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less"
+  ],
+  "scope": "Every matching tracked file, including upstream, vendored, generated, fixtures and examples; no exemptions were applied.",
+  "any_type_analysis": "Not performed by this line scanner. Confirmed explicit any examples in the report were manually inspected; word matches are not type counts.",
+  "repository": "tenpointdata/spacetime",
+  "revision": "1100f098f1fb79bdd0bc9cb51b705a0871c7a1b1",
+  "result": {
+    "files_expected": 957,
+    "files_scanned": 957,
+    "over_600": [
+      {
+        "path": "crates/bindings-typescript/src/lib/type_builders.ts",
+        "lines": 4108,
+        "sha": "41d2da1101595435747ba99d89e0a32a658678fa"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/paint-app/typescript/opus-4-5/spacetime/paint-app-20260112-154500/client/src/App.tsx",
+        "lines": 2531,
+        "sha": "0ef6a0f5f2c05bbb5538fcf872521bf94e1e003b"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/postgres/chat-app-20260104-120000/client/src/App.tsx",
+        "lines": 2178,
+        "sha": "205a649368f56f685a9b7a77b92bb19784e792ff"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/paint-app/typescript/opus-4-5/spacetime/paint-app-20260112-154500/backend/spacetimedb/src/index.ts",
+        "lines": 2083,
+        "sha": "cf9c406ecd466fe7d17b20bbbaaf80d182392134"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/postgres/chat-app-20260104-160000/client/src/App.tsx",
+        "lines": 1825,
+        "sha": "72177fe9766b846b5115a263e5ec0ef1740e0405"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/postgres/chat-app-20260104-120000/server/src/index.ts",
+        "lines": 1818,
+        "sha": "8cb477f17264753466349b766210c6d273d79eba"
+      },
+      {
+        "path": "crates/bindings-typescript/src/server/runtime.ts",
+        "lines": 1633,
+        "sha": "47331829e0a2f1a877473a26447c1fe66b745719"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/postgres/chat-app-20260104-180000/server/src/index.ts",
+        "lines": 1601,
+        "sha": "6cd4fd8068981b157fabb45fb42e4f0b287f8366"
+      },
+      {
+        "path": "tools/llm-sequential-upgrade/perf-benchmark/optimized-reference/pg-index-optimized.ts",
+        "lines": 1591,
+        "sha": "b23b51da0b4a2856be9b03c9598130245837fc83"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/postgres/chat-app-20260104-180000/client/src/App.tsx",
+        "lines": 1533,
+        "sha": "78cfa6c56a094211b64134c3ef60fb000475890b"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260102-170500/client/src/App.tsx",
+        "lines": 1463,
+        "sha": "416eac593d6a44e84eeb9da1d1cbacedbcf6207e"
+      },
+      {
+        "path": "docs/src/css/custom.css",
+        "lines": 1462,
+        "sha": "9d075b0e3cfb53d527df091c87c78fac5682c210"
+      },
+      {
+        "path": "crates/bindings-typescript/src/sdk/db_connection_impl.ts",
+        "lines": 1444,
+        "sha": "12dfca7afbfc9142dafea2b2f51fd5121e450a0d"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260105-180000/client/src/App.tsx",
+        "lines": 1361,
+        "sha": "dd13b9cc0db62563ce917e18778fd54039ad9366"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/postgres/chat-app-20260104-160000/server/src/index.ts",
+        "lines": 1318,
+        "sha": "2bc730c5c5f83e6547aba4b23616038af1f29afe"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260102-171317/backend/spacetimedb/src/index.ts",
+        "lines": 1305,
+        "sha": "7f5cf5ee8c966cfffaa7c558366173d57dfe4c5d"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260102-171317/client/src/App.tsx",
+        "lines": 1235,
+        "sha": "1d2ee48851a53af93d2ada60dd278839d149192a"
+      },
+      {
+        "path": "modules/sdk-test-ts/src/index.ts",
+        "lines": 1189,
+        "sha": "257086782f0146a040f406a8e84d8d8a68dffb64"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/paint-app/typescript/opus-4-5/spacetime/paint-app-20260109-164112/client/src/App.tsx",
+        "lines": 1166,
+        "sha": "3baf09107b3647a8605e36faf17300889362a445"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260105-180000/backend/spacetimedb/src/reducers.ts",
+        "lines": 1159,
+        "sha": "c8f7f2f6943856edc0c4f3e06e8d2d077db3ee11"
+      },
+      {
+        "path": "crates/bindings-typescript/tests/db_connection.test.ts",
+        "lines": 1115,
+        "sha": "9e340637eb8f64316f4ebdc523f19d1e0149ccab"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/paint-app/typescript/opus-4-5/spacetime/paint-app-20260112-154500/client/src/styles.css",
+        "lines": 1091,
+        "sha": "00bf29f15a9ea71954ca04df8778e597a115c70f"
+      },
+      {
+        "path": "crates/bindings-typescript/src/lib/query.ts",
+        "lines": 1085,
+        "sha": "bb93b0e6ce36beaee1105750e8a8713070a352f1"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260105-180000/client/src/styles.css",
+        "lines": 1085,
+        "sha": "b291089e4d4c77342b806a87fbc4506d0eeedb01"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/postgres/chat-app-20260104-120000/client/src/index.css",
+        "lines": 1077,
+        "sha": "cfc5c95ac1c93a551d7ae197e8e3a1a97d085660"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260102-162918/backend/spacetimedb/src/index.ts",
+        "lines": 996,
+        "sha": "9dfa35efb24ee03fce9289da6809d1ad3723f609"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/postgres/chat-app-20260104-180000/client/src/styles.css",
+        "lines": 982,
+        "sha": "cbf78c5bd838083d04fceaa10dd88c20576d13e4"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/postgres/chat-app-20260104-160000/client/src/styles.css",
+        "lines": 972,
+        "sha": "685ed9dcd506113d201812be8d6c18820d218342"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/gpt-5-2/spacetime/chat-app-20260107-092240/client/src/App.tsx",
+        "lines": 963,
+        "sha": "a826ca9ae327643efb7308045543293518490175"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260102-162918/client/src/styles.css",
+        "lines": 952,
+        "sha": "af8689b7d33f645b00520024aba02305e89c7a10"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260102-171317/client/src/styles.css",
+        "lines": 931,
+        "sha": "3193e75f7becaec0375610a9db9625876e102289"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260102-170500/client/src/index.css",
+        "lines": 913,
+        "sha": "83eb2a493c678b62108a4e1742208854d092bb7f"
+      },
+      {
+        "path": "crates/bindings-typescript/src/server/schema.ts",
+        "lines": 891,
+        "sha": "c399a66d31ee5c842fcc9a336d4b823ab92d9ec1"
+      },
+      {
+        "path": "tools/llm-sequential-upgrade/perf-benchmark/optimized-reference/mongo-index-optimized.ts",
+        "lines": 887,
+        "sha": "429114d8aaaf7a2ca4464f4a6cd34137f483a3d3"
+      },
+      {
+        "path": "crates/bindings-typescript/src/lib/algebraic_type.ts",
+        "lines": 819,
+        "sha": "c325797af753c2787a882a40c935200d0b0863e5"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/opus-4-5/spacetime/chat-app-20260102-170500/backend/spacetimedb/src/index.ts",
+        "lines": 815,
+        "sha": "13b0dae24e723e6c9f6b83034588089454abb930"
+      },
+      {
+        "path": "crates/bindings-typescript/tests/connection_manager_reconnect.test.ts",
+        "lines": 811,
+        "sha": "ee981ccf2f95d5c32863875cd32d2692ea61efee"
+      },
+      {
+        "path": "crates/bindings-typescript/src/lib/autogen/types.ts",
+        "lines": 797,
+        "sha": "1d8656fe9eb240fa44bbfe899371dcad00f53e63"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/gemini-3-pro/spacetime/chat-app-20260107-120000/client/src/App.tsx",
+        "lines": 791,
+        "sha": "c2df95db25b8a54b545c177e8ec22b0b29141cdb"
+      },
+      {
+        "path": "crates/bindings-typescript/tests/connection_manager.test.ts",
+        "lines": 783,
+        "sha": "ebd49a8e2fa0be2198b16fc8e0a224eb68d8ad68"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/grok-code/postgres/chat-app-20260128-112222/server/src/socket/index.ts",
+        "lines": 780,
+        "sha": "54af0dc0665a1fbc4adc0a44018409475ea19d05"
+      },
+      {
+        "path": "crates/bindings-typescript/tests/table_cache.test.ts",
+        "lines": 762,
+        "sha": "558faf06b484f1d68ef187be5a7aff0666aa2302"
+      },
+      {
+        "path": "tools/xtask-llm-benchmark/src/tools/llm_benchmark_stats_viewer.html",
+        "lines": 751,
+        "sha": "e49132b8d47ec34a0c7ba4aa675733aa67b9b136"
+      },
+      {
+        "path": "demo/Blackholio/server-ts/src/index.ts",
+        "lines": 725,
+        "sha": "cfde077ea35717b59c593b6e166664b44767a321"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/paint-app/typescript/opus-4-5/spacetime/paint-app-20260109-164112/backend/spacetimedb/src/index.ts",
+        "lines": 704,
+        "sha": "aba0a10af187a51f93464acd195517251847d4ca"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/gpt-5-2/postgres/chat-app-20260108-140800/client/src/App.tsx",
+        "lines": 700,
+        "sha": "694aa9c0be9cab5991b140b209c0bb6047947894"
+      },
+      {
+        "path": "tools/llm-sequential-upgrade/perf-benchmark/optimized-reference/stdb-index-optimized.ts",
+        "lines": 657,
+        "sha": "9510387b2baade48300194d7f3082327215a5954"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/gpt-5-2/postgres/chat-app-20260108-140800/server/src/index.ts",
+        "lines": 646,
+        "sha": "ba37b54b2fbce695f05ad5d977685cffa2dfddb9"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/paint-app/typescript/opus-4-5/spacetime/paint-app-20260109-164112/client/src/styles.css",
+        "lines": 631,
+        "sha": "fda9151f45e30c76f0159a19d34f4584580761a4"
+      },
+      {
+        "path": "tools/llm-oneshot/apps/chat-app/typescript/gemini-3-pro/spacetime/chat-app-20260107-120000/backend/spacetimedb/src/index.ts",
+        "lines": 625,
+        "sha": "3eaa3643f07bf00ad538404071e740f5934efd79"
+      },
+      {
+        "path": "modules/benchmarks-ts/src/synthetic.ts",
+        "lines": 606,
+        "sha": "7c00cf533a3ea16e4ed52718f36a3e749d7c6862"
+      }
+    ],
+    "gaps": [],
+    "over_600_count": 51,
+    "complete": true
+  }
+}
